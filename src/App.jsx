@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from "recharts";
 
 // ─── US NAVY BODY FAT FORMULA (MALE) ─────────────────────────────────────────
 // BF% = 495 / (1.0324 - 0.19077 * log10(waist - neck) + 0.15456 * log10(height)) - 450
@@ -59,7 +59,7 @@ const MILESTONES = [
   { id: "lost_10",      icon: "💎", label: "Double Digits",   desc: "Lost 10 kg/lbs total" },
   { id: "bf_athlete",   icon: "🏅", label: "Athlete Zone",    desc: "Reached athlete body fat (<14%)" },
   { id: "bf_fitness",   icon: "💪", label: "Fitness Zone",    desc: "Reached fitness body fat (<18%)" },
-  { id: "full_checkin", icon: "✅", label: "Complete Day",    desc: "Photo + weight + calories done" },
+  { id: "full_checkin", icon: "✅", label: "Complete Day",    desc: "Photo + weight logged together" },
   { id: "logs_10",      icon: "📋", label: "Consistent",      desc: "10 total check-ins logged" },
 ];
 
@@ -85,7 +85,7 @@ const checkMilestones = (logs, prevEarned) => {
   const bfLogs = logs.filter(l => l.bodyFat);
   if (bfLogs.some(l => l.bodyFat < 14)) e.add("bf_athlete");
   if (bfLogs.some(l => l.bodyFat < 18)) e.add("bf_fitness");
-  if (logs.some(l => l.weight && l.calories && l.photo)) e.add("full_checkin");
+  if (logs.some(l => l.weight && l.photo)) e.add("full_checkin");
   return [...e];
 };
 
@@ -96,6 +96,88 @@ const BFTooltip = ({ active, payload, label }) => {
     <div style={{ background:"#1a0a2e", border:"1px solid rgba(167,139,250,.3)", borderRadius:10, padding:"8px 14px", fontSize:12 }}>
       <div style={{ color:"rgba(255,255,255,.45)", marginBottom:2 }}>{label}</div>
       <div style={{ color:"#a78bfa", fontWeight:700 }}>{payload[0].value}% body fat</div>
+    </div>
+  );
+};
+
+// ─── FAT LOSS PREDICTION ENGINE ──────────────────────────────────────────────
+// 7700 kcal ≈ 1 kg of body fat
+// TDEE estimated via Mifflin-St Jeor (male) + activity multiplier
+const estimateTDEE = (weightKg, heightCm, ageYears = 30, activity = 1.375) => {
+  // BMR = 10*W + 6.25*H - 5*A + 5 (male)
+  const bmr = 10 * weightKg + 6.25 * heightCm - 5 * ageYears + 5;
+  return Math.round(bmr * activity);
+};
+
+const buildPrediction = (logs, profile, weeks = 12) => {
+  const withCal = [...logs].filter(l => l.calories && l.weight).sort((a,b) => new Date(a.date)-new Date(b.date));
+  const withBF  = [...logs].filter(l => l.bodyFat  && l.weight).sort((a,b) => new Date(a.date)-new Date(b.date));
+  if (!withCal.length && !withBF.length) return null;
+
+  // Use latest known values as starting point
+  const latestAll = [...logs].sort((a,b) => new Date(b.date)-new Date(a.date))[0];
+  if (!latestAll) return null;
+
+  const startWeight = latestAll.weight;
+  const startBF     = latestAll.bodyFat ?? null;
+  const heightCm    = profile.height ? (profile.unit === "cm" ? parseFloat(profile.height) : parseFloat(profile.height) * 2.54) : 175;
+
+  // Average daily calories from last 7 logged days
+  const recentCal = withCal.slice(-7);
+  const avgCal = recentCal.length
+    ? recentCal.reduce((s, l) => s + parseFloat(l.calories), 0) / recentCal.length
+    : null;
+
+  const tdee = estimateTDEE(startWeight, heightCm);
+  const dailyDeficit = avgCal ? tdee - avgCal : null; // positive = deficit
+
+  // Weekly fat loss in kg (7700 kcal = 1kg fat, capped at 1kg/week for realism)
+  const weeklyFatLossKg = dailyDeficit
+    ? Math.min(1.0, Math.max(-0.5, (dailyDeficit * 7) / 7700))
+    : null;
+
+  const startDate = new Date(latestAll.date + "T12:00:00");
+  const points = [];
+
+  for (let w = 0; w <= weeks; w++) {
+    const d = new Date(startDate);
+    d.setDate(d.getDate() + w * 7);
+    const label = d.toISOString().slice(5, 10); // MM-DD
+
+    const predWeight = weeklyFatLossKg !== null
+      ? Math.max(40, startWeight - weeklyFatLossKg * w)
+      : null;
+
+    let predBF = null;
+    if (startBF !== null && predWeight !== null) {
+      // Fat mass decreases, lean mass stays roughly same
+      const startFatMass  = startWeight * (startBF / 100);
+      const startLeanMass = startWeight - startFatMass;
+      const newFatMass    = Math.max(startFatMass * 0.02, startFatMass - weeklyFatLossKg * w);
+      predBF = Math.round(((newFatMass / (newFatMass + startLeanMass)) * 100) * 10) / 10;
+    }
+
+    points.push({
+      date: label,
+      predWeight: predWeight !== null ? Math.round(predWeight * 10) / 10 : null,
+      predBF: predBF !== null ? Math.max(4, predBF) : null,
+    });
+  }
+
+  return { points, tdee, avgCal, dailyDeficit, weeklyFatLossKg, startWeight, startBF };
+};
+
+// ─── CUSTOM PREDICT TOOLTIP ───────────────────────────────────────────────────
+const PredictTooltip = ({ active, payload, label }) => {
+  if (!active || !payload?.length) return null;
+  return (
+    <div style={{ background:"#0f0a1e", border:"1px solid rgba(52,211,153,.3)", borderRadius:10, padding:"8px 14px", fontSize:12 }}>
+      <div style={{ color:"rgba(255,255,255,.4)", marginBottom:3 }}>{label}</div>
+      {payload.map((p, i) => (
+        <div key={i} style={{ color: p.color, fontWeight:700 }}>
+          {p.name === "predWeight" ? `⚖️ ${p.value} kg` : `📏 ${p.value}% BF`}
+        </div>
+      ))}
     </div>
   );
 };
@@ -222,13 +304,18 @@ export default function App() {
 
   const TABS = [
     {id:"checkin",    icon:"📋", label:"Check-In"},
+    {id:"nutrition",  icon:"🍎", label:"Nutrition"},
+    {id:"predict",    icon:"🔮", label:"Predict"},
     {id:"bodyfat",    icon:"📊", label:"Body Fat"},
     {id:"history",    icon:"🗓",  label:"History"},
     {id:"milestones", icon:"🏆", label:"Badges"},
     {id:"settings",   icon:"⚙️", label:"Settings"},
   ];
 
-  const todayComplete = weight && calories && photoSrc;
+  const [predWeeks, setPredWeeks] = useState(12);
+  const prediction = buildPrediction(logs, profile, predWeeks);
+
+  const todayComplete = weight && photoSrc;
 
   return (
     <div style={{
@@ -333,7 +420,7 @@ export default function App() {
                 <div style={{fontSize:26}}>✅</div>
                 <div>
                   <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:16,color:"#34d399",letterSpacing:1}}>TODAY'S CHECK-IN COMPLETE!</div>
-                  <div style={{fontSize:11,color:muted}}>You can still update below</div>
+                  <div style={{fontSize:11,color:muted}}>Log your calories in the 🍎 Nutrition tab</div>
                 </div>
               </div>
             )}
@@ -432,64 +519,233 @@ export default function App() {
               )}
             </div>
 
-            {/* CALORIES */}
-            <div style={{background:card,border:`1px solid ${border}`,borderRadius:16,padding:17,marginBottom:15,backdropFilter:"blur(10px)"}}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:11}}>
-                <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:13,color:accent,letterSpacing:1}}>🔥 CALORIES & MACROS</div>
-                {!calories && <div style={{fontSize:10,color:"#f87171",fontWeight:700,background:"rgba(248,113,113,.1)",padding:"3px 8px",borderRadius:99}}>REQUIRED</div>}
+            {/* SAVE BUTTON */}
+            <button onClick={handleSubmit} disabled={!weight} style={{
+              width:"100%",padding:"15px",border:"none",borderRadius:14,
+              background:weight?"linear-gradient(135deg,#c2410c,#f97316)":isDark?"rgba(255,255,255,.07)":"rgba(0,0,0,.07)",
+              color:weight?"#fff":muted,
+              fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:22,letterSpacing:3,
+              cursor:weight?"pointer":"not-allowed",transition:"all .2s",
+              boxShadow:weight?"0 6px 24px rgba(249,115,22,.35)":"none",
+            }}>{submitted?"✓ UPDATE CHECK-IN":"SAVE CHECK-IN"}</button>
+
+            {!todayComplete&&(
+              <div style={{marginTop:8,textAlign:"center",fontSize:11,color:muted}}>
+                Still needed: {[!photoSrc&&"📷 Photo",!weight&&"⚖️ Weight"].filter(Boolean).join("  •  ")}
               </div>
-              <div style={{marginBottom:10}}>
-                <label style={{fontSize:10,color:muted,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:.5}}>Total Calories *</label>
+            )}
+          </div>
+        )}
+
+        {/* ════════════════════ NUTRITION ════════════════════ */}
+        {tab==="nutrition" && (
+          <div style={{animation:"fadeUp .3s ease"}}>
+            <div style={{background:card,border:`1px solid ${border}`,borderRadius:16,padding:18,backdropFilter:"blur(10px)"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
+                <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:14,color:"#fbbf24",letterSpacing:1}}>🔥 CALORIES & MACROS</div>
+                <div style={{fontSize:10,color:muted,background:isDark?"rgba(251,191,36,.1)":"rgba(251,191,36,.12)",padding:"3px 8px",borderRadius:99}}>OPTIONAL</div>
+              </div>
+              <div style={{fontSize:11,color:muted,marginBottom:14}}>Track today's nutrition — logs are saved alongside your check-in</div>
+
+              <div style={{marginBottom:12}}>
+                <label style={{fontSize:10,color:muted,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:.5}}>Total Calories (kcal)</label>
                 <input type="number" placeholder="e.g. 1800" value={calories}
-                  onChange={e=>{setCalories(e.target.value);setSubmitted(false);}}
-                  style={{...inp,fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:26,borderColor:calories?accent:border}}/>
+                  onChange={e=>{setCalories(e.target.value);}}
+                  style={{...inp,fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:26,borderColor:calories?"#fbbf24":border}}/>
               </div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8}}>
+
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
                 {[["Protein (g)",protein,setProtein,"#60a5fa"],["Carbs (g)",carbs,setCarbs,"#fbbf24"],["Fat (g)",fat,setFat,"#f87171"]].map(([label,val,setter,col])=>(
                   <div key={label}>
                     <label style={{fontSize:9,color:muted,display:"block",marginBottom:4,textTransform:"uppercase",letterSpacing:.5}}>{label}</label>
                     <input type="number" placeholder="0" value={val}
-                      onChange={e=>{setter(e.target.value);setSubmitted(false);}}
+                      onChange={e=>setter(e.target.value)}
                       style={{...inp,borderColor:`${col}44`,textAlign:"center"}}/>
                   </div>
                 ))}
               </div>
+
+              {/* Macro bar */}
               {protein&&carbs&&fat&&(
-                <div style={{marginTop:11}}>
-                  <div style={{height:7,borderRadius:99,overflow:"hidden",display:"flex",gap:1}}>
+                <div style={{marginBottom:14}}>
+                  <div style={{height:8,borderRadius:99,overflow:"hidden",display:"flex",gap:1}}>
                     {(()=>{const p=(parseFloat(protein)||0)*4,c=(parseFloat(carbs)||0)*4,f=(parseFloat(fat)||0)*9,t=p+c+f||1;
                       return[[p,"#60a5fa"],[c,"#fbbf24"],[f,"#f87171"]].map(([v,col],i)=>(
                         <div key={i} style={{flex:v/t,background:col,transition:"flex .4s"}}/>
                       ));
                     })()}
                   </div>
-                  <div style={{display:"flex",gap:12,marginTop:5}}>
-                    {[["P","#60a5fa",protein+"g"],["C","#fbbf24",carbs+"g"],["F","#f87171",fat+"g"]].map(([l,c,v])=>(
-                      <div key={l} style={{display:"flex",alignItems:"center",gap:4,fontSize:10,color:muted}}>
-                        <div style={{width:7,height:7,borderRadius:99,background:c}}/>
-                        {l}: {v}
+                  <div style={{display:"flex",gap:14,marginTop:6}}>
+                    {[["Protein","#60a5fa",protein+"g"],["Carbs","#fbbf24",carbs+"g"],["Fat","#f87171",fat+"g"]].map(([l,c,v])=>(
+                      <div key={l} style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:muted}}>
+                        <div style={{width:8,height:8,borderRadius:99,background:c}}/>
+                        {l}: <b style={{color:text}}>{v}</b>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
+
+              {/* Calorie target indicator */}
+              {calories && profile.calTarget && (
+                <div style={{padding:"10px 14px",borderRadius:10,background:isDark?"rgba(251,191,36,.08)":"rgba(251,191,36,.07)",border:"1px solid rgba(251,191,36,.2)",fontSize:12,color:"#fbbf24"}}>
+                  {parseFloat(calories) <= parseFloat(profile.calTarget) ? "✅ Under target" : "⚠️ Over target"} — {Math.abs(parseFloat(calories) - parseFloat(profile.calTarget))} kcal {parseFloat(calories) <= parseFloat(profile.calTarget) ? "remaining" : "over"}
+                </div>
+              )}
+
+              <button onClick={()=>{
+                const existing = logs.find(l=>l.date===today);
+                if (!existing) { alert("Save your check-in first!"); return; }
+                const updated = {...existing, calories, protein, carbs, fat};
+                const newLogs = [...logs.filter(l=>l.date!==today), updated].sort((a,b)=>new Date(b.date)-new Date(a.date));
+                setLogs(newLogs); store.set("wt_logs", newLogs);
+              }} style={{
+                width:"100%",padding:"13px",border:"none",borderRadius:12,marginTop:4,
+                background:calories?"linear-gradient(135deg,#b45309,#fbbf24)":isDark?"rgba(255,255,255,.07)":"rgba(0,0,0,.07)",
+                color:calories?"#000":muted,
+                fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:18,letterSpacing:2,
+                cursor:calories?"pointer":"not-allowed",transition:"all .2s",
+              }}>SAVE NUTRITION</button>
+              <div style={{marginTop:6,fontSize:10,color:muted,textAlign:"center"}}>Requires check-in to be saved first</div>
             </div>
 
-            {/* SAVE BUTTON */}
-            <button onClick={handleSubmit} disabled={!weight||!calories} style={{
-              width:"100%",padding:"15px",border:"none",borderRadius:14,
-              background:(weight&&calories)?"linear-gradient(135deg,#c2410c,#f97316)":isDark?"rgba(255,255,255,.07)":"rgba(0,0,0,.07)",
-              color:(weight&&calories)?"#fff":muted,
-              fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:22,letterSpacing:3,
-              cursor:(weight&&calories)?"pointer":"not-allowed",transition:"all .2s",
-              boxShadow:(weight&&calories)?"0 6px 24px rgba(249,115,22,.35)":"none",
-            }}>{submitted?"✓ UPDATE CHECK-IN":"SAVE CHECK-IN"}</button>
+            {/* Calorie goal setting */}
+            <div style={{background:card,border:`1px solid ${border}`,borderRadius:16,padding:18,marginTop:12,backdropFilter:"blur(10px)"}}>
+              <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:13,color:"#fbbf24",letterSpacing:1,marginBottom:10}}>🎯 DAILY CALORIE TARGET</div>
+              <input type="number" placeholder="e.g. 2000" value={profile.calTarget||""}
+                onChange={e=>saveProfile({...profile,calTarget:e.target.value})}
+                style={{...inp,fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:22}}/>
+              <div style={{marginTop:6,fontSize:11,color:muted}}>Set your daily target to track if you're over or under</div>
+            </div>
+          </div>
+        )}
 
-            {!todayComplete&&(
-              <div style={{marginTop:8,textAlign:"center",fontSize:11,color:muted}}>
-                Still needed: {[!photoSrc&&"📷 Photo",!weight&&"⚖️ Weight",!calories&&"🔥 Calories"].filter(Boolean).join("  •  ")}
+        {/* ════════════════════ PREDICT ════════════════════ */}
+        {tab==="predict" && (
+          <div style={{animation:"fadeUp .3s ease", display:"flex", flexDirection:"column", gap:12}}>
+
+            {/* Needs data notice */}
+            {!prediction && (
+              <div style={{background:card,border:`1px solid ${border}`,borderRadius:16,padding:24,backdropFilter:"blur(10px)",textAlign:"center"}}>
+                <div style={{fontSize:40,marginBottom:10}}>🔮</div>
+                <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:18,color:"#34d399",letterSpacing:1,marginBottom:8}}>PREDICTION NOT READY YET</div>
+                <div style={{fontSize:12,color:muted,lineHeight:1.7}}>
+                  To unlock fat-loss predictions, log at least:<br/>
+                  <b style={{color:text}}>1 check-in</b> with weight + waist + neck measurements<br/>
+                  <b style={{color:text}}>1 calorie entry</b> in the 🍎 Nutrition tab
+                </div>
               </div>
             )}
+
+            {prediction && (() => {
+              const { points, tdee, avgCal, dailyDeficit, weeklyFatLossKg, startWeight, startBF } = prediction;
+              const isDeficit = dailyDeficit && dailyDeficit > 0;
+              const goalWeight = profile.goal ? parseFloat(profile.goal) : null;
+              const weeksToGoal = goalWeight && weeklyFatLossKg > 0
+                ? Math.ceil((startWeight - goalWeight) / weeklyFatLossKg)
+                : null;
+              const goalDate = weeksToGoal
+                ? (() => { const d = new Date(); d.setDate(d.getDate() + weeksToGoal * 7); return d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}); })()
+                : null;
+
+              return (
+                <>
+                  {/* Summary cards */}
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                    {[
+                      {label:"Your TDEE",        val:`${tdee || "?"}`,                        sub:"kcal/day maintenance", icon:"⚡", col:"#60a5fa"},
+                      {label:"Avg Intake",        val:avgCal?`${Math.round(avgCal)}`:"?",      sub:"kcal/day (last 7)",    icon:"🍽️", col:"#fbbf24"},
+                      {label:"Daily Deficit",     val:dailyDeficit?`${Math.abs(Math.round(dailyDeficit))}`:"?", sub:isDeficit?"kcal deficit":"kcal surplus", icon:isDeficit?"📉":"📈", col:isDeficit?"#34d399":"#f87171"},
+                      {label:"Weekly Fat Loss",   val:weeklyFatLossKg?`${weeklyFatLossKg>0?weeklyFatLossKg.toFixed(2):"0"}`:"?", sub:"kg per week", icon:"🔥", col:isDeficit?"#34d399":"#f87171"},
+                    ].map((s,i)=>(
+                      <div key={i} style={{background:card,border:`1px solid ${s.col}28`,borderRadius:12,padding:"13px 14px",backdropFilter:"blur(10px)"}}>
+                        <div style={{fontSize:18,marginBottom:4}}>{s.icon}</div>
+                        <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:24,color:s.col,lineHeight:1}}>{s.val}</div>
+                        <div style={{fontSize:10,color:muted,marginTop:3,textTransform:"uppercase",letterSpacing:.4}}>{s.label}</div>
+                        <div style={{fontSize:9,color:muted,opacity:.7}}>{s.sub}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Goal ETA */}
+                  {goalDate && weeklyFatLossKg > 0 && (
+                    <div style={{background:"linear-gradient(135deg,rgba(52,211,153,.12),rgba(16,185,129,.07))",border:"1px solid rgba(52,211,153,.3)",borderRadius:14,padding:"16px 18px",display:"flex",alignItems:"center",gap:14}}>
+                      <div style={{fontSize:32}}>🎯</div>
+                      <div>
+                        <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:16,color:"#34d399",letterSpacing:1}}>GOAL WEIGHT ESTIMATED BY</div>
+                        <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:24,color:"#fff",marginTop:2}}>{goalDate}</div>
+                        <div style={{fontSize:11,color:"rgba(255,255,255,.4)",marginTop:2}}>~{weeksToGoal} weeks at current deficit • {goalWeight} kg goal</div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Surplus warning */}
+                  {!isDeficit && avgCal && (
+                    <div style={{background:"rgba(248,113,113,.08)",border:"1px solid rgba(248,113,113,.25)",borderRadius:14,padding:"14px 16px",display:"flex",alignItems:"center",gap:12}}>
+                      <div style={{fontSize:28}}>⚠️</div>
+                      <div>
+                        <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:14,color:"#f87171",letterSpacing:1}}>YOU'RE IN A CALORIE SURPLUS</div>
+                        <div style={{fontSize:11,color:"rgba(255,255,255,.4)",marginTop:2}}>Eating {Math.abs(Math.round(dailyDeficit))} kcal above maintenance. Reduce intake or increase activity to lose fat.</div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Projection chart */}
+                  <div style={{background:card,border:"1px solid rgba(52,211,153,.2)",borderRadius:16,padding:18,backdropFilter:"blur(10px)"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                      <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:14,color:"#34d399",letterSpacing:1}}>📈 PROJECTION CHART</div>
+                      <div style={{display:"flex",gap:4}}>
+                        {[4,8,12,16].map(w=>(
+                          <button key={w} onClick={()=>setPredWeeks(w)} style={{
+                            padding:"3px 9px",border:"none",borderRadius:99,fontSize:10,fontWeight:700,cursor:"pointer",
+                            background:predWeeks===w?"#34d399":isDark?"rgba(255,255,255,.08)":"rgba(0,0,0,.07)",
+                            color:predWeeks===w?"#000":muted,
+                          }}>{w}w</button>
+                        ))}
+                      </div>
+                    </div>
+                    <div style={{fontSize:10,color:muted,marginBottom:12}}>
+                      <span style={{color:"#34d399"}}>── Weight (kg)</span>
+                      {startBF && <span style={{color:"#a78bfa",marginLeft:12}}>── Body Fat %</span>}
+                    </div>
+                    <ResponsiveContainer width="100%" height={200}>
+                      <LineChart data={points} margin={{top:5,right:5,bottom:5,left:-20}}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={isDark?"rgba(255,255,255,.04)":"rgba(0,0,0,.05)"}/>
+                        <XAxis dataKey="date" tick={{fontSize:9,fill:muted}} tickLine={false} axisLine={false}/>
+                        <YAxis tick={{fontSize:9,fill:muted}} tickLine={false} axisLine={false} domain={["auto","auto"]}/>
+                        <Tooltip content={<PredictTooltip/>}/>
+                        {goalWeight && <ReferenceLine y={goalWeight} stroke="#34d399" strokeDasharray="4 4" label={{value:"Goal",fill:"#34d399",fontSize:9,position:"right"}}/>}
+                        <Line type="monotone" dataKey="predWeight" stroke="#34d399" strokeWidth={2.5} strokeDasharray="6 3" dot={false} name="predWeight"/>
+                        {startBF && <Line type="monotone" dataKey="predBF" stroke="#a78bfa" strokeWidth={2} strokeDasharray="4 4" dot={false} name="predBF"/>}
+                      </LineChart>
+                    </ResponsiveContainer>
+                    <div style={{marginTop:8,padding:"8px 12px",background:isDark?"rgba(255,255,255,.04)":"rgba(0,0,0,.03)",borderRadius:8,fontSize:10,color:muted,textAlign:"center"}}>
+                      ⚠️ Estimates only — actual results depend on metabolism, activity & adherence
+                    </div>
+                  </div>
+
+                  {/* End-of-period projection */}
+                  {weeklyFatLossKg > 0 && (
+                    <div style={{background:card,border:`1px solid ${border}`,borderRadius:16,padding:18,backdropFilter:"blur(10px)"}}>
+                      <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:13,color:"#34d399",letterSpacing:1,marginBottom:12}}>IN {predWeeks} WEEKS AT THIS RATE</div>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
+                        {[
+                          {label:"Predicted Weight", val:`${Math.max(40,startWeight-weeklyFatLossKg*predWeeks).toFixed(1)} kg`, col:"#34d399"},
+                          {label:"Fat Lost", val:`${(weeklyFatLossKg*predWeeks).toFixed(1)} kg`, col:"#f97316"},
+                          startBF ? {label:"Predicted BF%", val:`${Math.max(4,startBF-(weeklyFatLossKg*predWeeks/(startWeight*(startBF/100))*100*0.8)).toFixed(1)}%`, col:"#a78bfa"} : null,
+                          {label:"Calorie Deficit", val:`${Math.round(dailyDeficit*7*predWeeks).toLocaleString()} kcal`, col:"#60a5fa"},
+                        ].filter(Boolean).map((s,i)=>(
+                          <div key={i} style={{padding:"12px",background:isDark?"rgba(255,255,255,.04)":"rgba(0,0,0,.04)",borderRadius:10}}>
+                            <div style={{fontSize:10,color:muted,textTransform:"uppercase",letterSpacing:.4,marginBottom:3}}>{s.label}</div>
+                            <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:22,color:s.col}}>{s.val}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </>
+              );
+            })()}
           </div>
         )}
 
