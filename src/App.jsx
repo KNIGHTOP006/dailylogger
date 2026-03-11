@@ -249,8 +249,14 @@ export default function App() {
   const [earned,   setEarned]   = useState([]);
   const [profile,  setProfile]  = useState({ height:"", goal:"", unit:"cm", calTarget:"" });
   const [tab,      setTab]      = useState("checkin");
-  const [newBadge, setNewBadge] = useState(null);
-  const [predWeeks,setPredWeeks]= useState(12);
+  const [newBadge,    setNewBadge]    = useState(null);
+  const [predWeeks,   setPredWeeks]   = useState(12);
+  const [toast,       setToast]       = useState(null); // { msg, icon, color }
+
+  const showToast = (msg, icon="✅", color="#34d399") => {
+    setToast({ msg, icon, color });
+    setTimeout(() => setToast(null), 2500);
+  };
 
   // Check-in form state
   const [weight,       setWeight]       = useState("");
@@ -365,13 +371,14 @@ export default function App() {
       await saveEarned(ne);
     }
     setSubmitted(true);
-  };
+    showToast("Check-in saved! 💪", "✅", "#34d399");
 
   const handleSaveNutrition = async () => {
     const existing = logs.find(l => l.date === today);
-    if (!existing) { alert("Save your check-in first!"); return; }
+    if (!existing) { showToast("Save your check-in first!", "⚠️", "#f87171"); return; }
     const updated = { ...existing, calories: calories||null, protein: protein||null, carbs: carbs||null, fat: fat||null };
     await saveLog(updated);
+    showToast("Nutrition saved! 🔥", "🔥", "#fbbf24");
   };
 
   const exportCSV = () => {
@@ -465,11 +472,29 @@ export default function App() {
         input[type=date]{color-scheme:${isDark?"dark":"light"}}
         input:focus{border-color:#f97316 !important; box-shadow:0 0 0 3px rgba(249,115,22,.12)}
         @keyframes slideDown{from{transform:translateY(-80px) scale(.9);opacity:0}to{transform:translateY(0) scale(1);opacity:1}}
+        @keyframes slideUp{from{transform:translate(-50%,40px);opacity:0}to{transform:translate(-50%,0);opacity:1}}
         @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
         @keyframes bfPulse{0%,100%{transform:scale(1)}50%{transform:scale(1.04)}}
         .row-item:not(:last-child){border-bottom:1px solid ${border}}
         .tab-btn:active{transform:scale(.95)}
       `}</style>
+
+      {/* CONFIRMATION TOAST */}
+      {toast && (
+        <div style={{
+          position:"fixed", bottom:100, left:"50%", transform:"translateX(-50%)",
+          zIndex:998, animation:"slideUp .35s cubic-bezier(.34,1.56,.64,1)",
+          background: isDark ? "rgba(20,20,32,.97)" : "rgba(255,255,255,.97)",
+          border:`1px solid ${toast.color}44`,
+          borderRadius:14, padding:"13px 22px",
+          display:"flex", alignItems:"center", gap:10,
+          boxShadow:`0 8px 32px rgba(0,0,0,.35), 0 0 0 1px ${toast.color}22`,
+          minWidth:220, maxWidth:320,
+        }}>
+          <div style={{fontSize:22}}>{toast.icon}</div>
+          <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:16,color:toast.color,letterSpacing:.5}}>{toast.msg}</div>
+        </div>
+      )}
 
       {/* BADGE TOAST */}
       {newBadge && (
@@ -663,41 +688,16 @@ export default function App() {
           <div style={{animation:"fadeUp .3s ease"}}>
             <div style={{background:card,border:`1px solid ${border}`,borderRadius:16,padding:18,backdropFilter:"blur(10px)"}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
-                <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:14,color:"#fbbf24",letterSpacing:1}}>🔥 CALORIES & MACROS</div>
+                <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:14,color:"#fbbf24",letterSpacing:1}}>🔥 CALORIES</div>
                 <div style={{fontSize:10,color:muted,background:isDark?"rgba(251,191,36,.1)":"rgba(251,191,36,.12)",padding:"3px 8px",borderRadius:99}}>OPTIONAL</div>
               </div>
-              <div style={{fontSize:11,color:muted,marginBottom:14}}>Track today's nutrition — saved alongside your check-in</div>
-              <div style={{marginBottom:12}}>
+              <div style={{fontSize:11,color:muted,marginBottom:14}}>Track today's calories — saved alongside your check-in</div>
+              <div style={{marginBottom:14}}>
                 <label style={{fontSize:10,color:muted,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:.5}}>Total Calories (kcal)</label>
                 <input type="number" placeholder="e.g. 1800" value={calories}
                   onChange={e=>setCalories(e.target.value)}
-                  style={{...inp,fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:26,borderColor:calories?"#fbbf24":border}}/>
+                  style={{...inp,fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:32,borderColor:calories?"#fbbf24":border,textAlign:"center"}}/>
               </div>
-              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
-                {[["Protein (g)",protein,setProtein,"#60a5fa"],["Carbs (g)",carbs,setCarbs,"#fbbf24"],["Fat (g)",fat,setFat,"#f87171"]].map(([label,val,setter,col])=>(
-                  <div key={label}>
-                    <label style={{fontSize:9,color:muted,display:"block",marginBottom:4,textTransform:"uppercase",letterSpacing:.5}}>{label}</label>
-                    <input type="number" placeholder="0" value={val} onChange={e=>setter(e.target.value)}
-                      style={{...inp,borderColor:`${col}44`,textAlign:"center"}}/>
-                  </div>
-                ))}
-              </div>
-              {protein&&carbs&&fat&&(
-                <div style={{marginBottom:14}}>
-                  <div style={{height:8,borderRadius:99,overflow:"hidden",display:"flex",gap:1}}>
-                    {(()=>{const p=(parseFloat(protein)||0)*4,c=(parseFloat(carbs)||0)*4,f=(parseFloat(fat)||0)*9,t=p+c+f||1;
-                      return[[p,"#60a5fa"],[c,"#fbbf24"],[f,"#f87171"]].map(([v,col],i)=>(<div key={i} style={{flex:v/t,background:col,transition:"flex .4s"}}/>));
-                    })()}
-                  </div>
-                  <div style={{display:"flex",gap:14,marginTop:6}}>
-                    {[["Protein","#60a5fa",protein+"g"],["Carbs","#fbbf24",carbs+"g"],["Fat","#f87171",fat+"g"]].map(([l,c,v])=>(
-                      <div key={l} style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:muted}}>
-                        <div style={{width:8,height:8,borderRadius:99,background:c}}/>{l}: <b style={{color:text}}>{v}</b>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
               {calories && profile.calTarget && (
                 <div style={{padding:"10px 14px",borderRadius:10,background:isDark?"rgba(251,191,36,.08)":"rgba(251,191,36,.07)",border:"1px solid rgba(251,191,36,.2)",fontSize:12,color:"#fbbf24",marginBottom:14}}>
                   {parseFloat(calories)<=parseFloat(profile.calTarget)?"✅ Under target":"⚠️ Over target"} — {Math.abs(parseFloat(calories)-parseFloat(profile.calTarget))} kcal {parseFloat(calories)<=parseFloat(profile.calTarget)?"remaining":"over"}
