@@ -1,8 +1,16 @@
 import { useState, useEffect, useRef } from "react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from "recharts";
+import { db } from "./firebase";
+import {
+  doc, getDoc, setDoc, collection,
+  getDocs, deleteDoc, onSnapshot
+} from "firebase/firestore";
 
-// ─── US NAVY BODY FAT FORMULA (MALE) ─────────────────────────────────────────
-// BF% = 495 / (1.0324 - 0.19077 * log10(waist - neck) + 0.15456 * log10(height)) - 450
+// ─── PIN ──────────────────────────────────────────────────────────────────────
+const CORRECT_PIN = "1234"; // ← CHANGE THIS to your preferred PIN
+const USER_ID     = "harshith"; // ← your unique ID in Firestore
+
+// ─── US NAVY BODY FAT (MALE) ──────────────────────────────────────────────────
 const calcNavyBF = (waistCm, neckCm, heightCm) => {
   if (!waistCm || !neckCm || !heightCm) return null;
   const w = parseFloat(waistCm), n = parseFloat(neckCm), h = parseFloat(heightCm);
@@ -14,10 +22,10 @@ const calcNavyBF = (waistCm, neckCm, heightCm) => {
 
 const getBFCategory = (bf) => {
   if (bf < 6)  return { label: "Essential Fat", color: "#60a5fa", bar: 5 };
-  if (bf < 14) return { label: "Athlete", color: "#34d399", bar: 25 };
-  if (bf < 18) return { label: "Fitness", color: "#a78bfa", bar: 50 };
-  if (bf < 25) return { label: "Acceptable", color: "#fbbf24", bar: 75 };
-  return             { label: "Obese", color: "#f87171", bar: 95 };
+  if (bf < 14) return { label: "Athlete",        color: "#34d399", bar: 25 };
+  if (bf < 18) return { label: "Fitness",         color: "#a78bfa", bar: 50 };
+  if (bf < 25) return { label: "Acceptable",      color: "#fbbf24", bar: 75 };
+  return              { label: "Obese",            color: "#f87171", bar: 95 };
 };
 
 const getBMICat = (bmi) => {
@@ -38,6 +46,42 @@ const computeStreak = (logs) => {
     if (diff === 0 || diff === 1) { streak++; cur = ld; } else break;
   }
   return streak;
+};
+
+// ─── FAT LOSS PREDICTION ──────────────────────────────────────────────────────
+const estimateTDEE = (weightKg, heightCm, age = 30, activity = 1.375) => {
+  const bmr = 10 * weightKg + 6.25 * heightCm - 5 * age + 5;
+  return Math.round(bmr * activity);
+};
+
+const buildPrediction = (logs, profile, weeks = 12) => {
+  const withCal = [...logs].filter(l => l.calories && l.weight).sort((a,b) => new Date(a.date)-new Date(b.date));
+  if (!withCal.length) return null;
+  const latestAll = [...logs].sort((a,b) => new Date(b.date)-new Date(a.date))[0];
+  if (!latestAll) return null;
+  const startWeight = latestAll.weight;
+  const startBF     = latestAll.bodyFat ?? null;
+  const heightCm    = profile.height ? (profile.unit === "cm" ? parseFloat(profile.height) : parseFloat(profile.height)*2.54) : 175;
+  const avgCal      = withCal.slice(-7).reduce((s,l) => s + parseFloat(l.calories), 0) / Math.min(7, withCal.length);
+  const tdee        = estimateTDEE(startWeight, heightCm);
+  const dailyDeficit = tdee - avgCal;
+  const weeklyFatLossKg = Math.min(1.0, Math.max(-0.5, (dailyDeficit * 7) / 7700));
+  const startDate   = new Date(latestAll.date + "T12:00:00");
+  const points = [];
+  for (let w = 0; w <= weeks; w++) {
+    const d = new Date(startDate); d.setDate(d.getDate() + w * 7);
+    const label = d.toISOString().slice(5,10);
+    const predWeight = Math.max(40, startWeight - weeklyFatLossKg * w);
+    let predBF = null;
+    if (startBF !== null) {
+      const startFatMass  = startWeight * (startBF / 100);
+      const startLeanMass = startWeight - startFatMass;
+      const newFatMass    = Math.max(startFatMass * 0.02, startFatMass - weeklyFatLossKg * w);
+      predBF = Math.max(4, Math.round(((newFatMass / (newFatMass + startLeanMass)) * 100) * 10) / 10);
+    }
+    points.push({ date: label, predWeight: Math.round(predWeight*10)/10, predBF });
+  }
+  return { points, tdee, avgCal: Math.round(avgCal), dailyDeficit, weeklyFatLossKg, startWeight, startBF };
 };
 
 const QUOTES = [
@@ -63,12 +107,6 @@ const MILESTONES = [
   { id: "logs_10",      icon: "📋", label: "Consistent",      desc: "10 total check-ins logged" },
 ];
 
-let _mem = {};
-const store = {
-  get: (k) => { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : null; } catch { return _mem[k]??null; } },
-  set: (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { _mem[k] = v; } },
-};
-
 const checkMilestones = (logs, prevEarned) => {
   const e = new Set(prevEarned);
   const streak = computeStreak(logs);
@@ -89,7 +127,7 @@ const checkMilestones = (logs, prevEarned) => {
   return [...e];
 };
 
-// ─── TOOLTIP ─────────────────────────────────────────────────────────────────
+// ─── TOOLTIPS ─────────────────────────────────────────────────────────────────
 const BFTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
   return (
@@ -100,121 +138,162 @@ const BFTooltip = ({ active, payload, label }) => {
   );
 };
 
-// ─── FAT LOSS PREDICTION ENGINE ──────────────────────────────────────────────
-// 7700 kcal ≈ 1 kg of body fat
-// TDEE estimated via Mifflin-St Jeor (male) + activity multiplier
-const estimateTDEE = (weightKg, heightCm, ageYears = 30, activity = 1.375) => {
-  // BMR = 10*W + 6.25*H - 5*A + 5 (male)
-  const bmr = 10 * weightKg + 6.25 * heightCm - 5 * ageYears + 5;
-  return Math.round(bmr * activity);
-};
-
-const buildPrediction = (logs, profile, weeks = 12) => {
-  const withCal = [...logs].filter(l => l.calories && l.weight).sort((a,b) => new Date(a.date)-new Date(b.date));
-  const withBF  = [...logs].filter(l => l.bodyFat  && l.weight).sort((a,b) => new Date(a.date)-new Date(b.date));
-  if (!withCal.length && !withBF.length) return null;
-
-  // Use latest known values as starting point
-  const latestAll = [...logs].sort((a,b) => new Date(b.date)-new Date(a.date))[0];
-  if (!latestAll) return null;
-
-  const startWeight = latestAll.weight;
-  const startBF     = latestAll.bodyFat ?? null;
-  const heightCm    = profile.height ? (profile.unit === "cm" ? parseFloat(profile.height) : parseFloat(profile.height) * 2.54) : 175;
-
-  // Average daily calories from last 7 logged days
-  const recentCal = withCal.slice(-7);
-  const avgCal = recentCal.length
-    ? recentCal.reduce((s, l) => s + parseFloat(l.calories), 0) / recentCal.length
-    : null;
-
-  const tdee = estimateTDEE(startWeight, heightCm);
-  const dailyDeficit = avgCal ? tdee - avgCal : null; // positive = deficit
-
-  // Weekly fat loss in kg (7700 kcal = 1kg fat, capped at 1kg/week for realism)
-  const weeklyFatLossKg = dailyDeficit
-    ? Math.min(1.0, Math.max(-0.5, (dailyDeficit * 7) / 7700))
-    : null;
-
-  const startDate = new Date(latestAll.date + "T12:00:00");
-  const points = [];
-
-  for (let w = 0; w <= weeks; w++) {
-    const d = new Date(startDate);
-    d.setDate(d.getDate() + w * 7);
-    const label = d.toISOString().slice(5, 10); // MM-DD
-
-    const predWeight = weeklyFatLossKg !== null
-      ? Math.max(40, startWeight - weeklyFatLossKg * w)
-      : null;
-
-    let predBF = null;
-    if (startBF !== null && predWeight !== null) {
-      // Fat mass decreases, lean mass stays roughly same
-      const startFatMass  = startWeight * (startBF / 100);
-      const startLeanMass = startWeight - startFatMass;
-      const newFatMass    = Math.max(startFatMass * 0.02, startFatMass - weeklyFatLossKg * w);
-      predBF = Math.round(((newFatMass / (newFatMass + startLeanMass)) * 100) * 10) / 10;
-    }
-
-    points.push({
-      date: label,
-      predWeight: predWeight !== null ? Math.round(predWeight * 10) / 10 : null,
-      predBF: predBF !== null ? Math.max(4, predBF) : null,
-    });
-  }
-
-  return { points, tdee, avgCal, dailyDeficit, weeklyFatLossKg, startWeight, startBF };
-};
-
-// ─── CUSTOM PREDICT TOOLTIP ───────────────────────────────────────────────────
 const PredictTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
   return (
     <div style={{ background:"#0f0a1e", border:"1px solid rgba(52,211,153,.3)", borderRadius:10, padding:"8px 14px", fontSize:12 }}>
       <div style={{ color:"rgba(255,255,255,.4)", marginBottom:3 }}>{label}</div>
-      {payload.map((p, i) => (
-        <div key={i} style={{ color: p.color, fontWeight:700 }}>
-          {p.name === "predWeight" ? `⚖️ ${p.value} kg` : `📏 ${p.value}% BF`}
+      {payload.map((p,i) => (
+        <div key={i} style={{ color:p.color, fontWeight:700 }}>
+          {p.name==="predWeight" ? `⚖️ ${p.value} kg` : `📏 ${p.value}% BF`}
         </div>
       ))}
     </div>
   );
 };
 
+// ─── PIN SCREEN ───────────────────────────────────────────────────────────────
+function PinScreen({ onUnlock }) {
+  const [pin, setPin] = useState("");
+  const [shake, setShake] = useState(false);
+  const [attempts, setAttempts] = useState(0);
+
+  const handleKey = (k) => {
+    if (k === "del") { setPin(p => p.slice(0,-1)); return; }
+    const next = pin + k;
+    setPin(next);
+    if (next.length === 4) {
+      if (next === CORRECT_PIN) {
+        onUnlock();
+      } else {
+        setShake(true);
+        setAttempts(a => a+1);
+        setTimeout(() => { setShake(false); setPin(""); }, 600);
+      }
+    }
+  };
+
+  return (
+    <div style={{
+      minHeight:"100vh", display:"flex", flexDirection:"column",
+      alignItems:"center", justifyContent:"center",
+      background:"radial-gradient(ellipse at 20% 0%, #1a0808 0%, #080810 70%)",
+      fontFamily:"'Barlow',sans-serif",
+    }}>
+      <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;600;700&family=Barlow+Condensed:wght@700;800&display=swap" rel="stylesheet"/>
+      <style>{`
+        @keyframes shake{0%,100%{transform:translateX(0)}20%,60%{transform:translateX(-10px)}40%,80%{transform:translateX(10px)}}
+        @keyframes fadeIn{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:translateY(0)}}
+      `}</style>
+
+      <div style={{ animation:"fadeIn .5s ease", textAlign:"center", width:"100%", maxWidth:320, padding:"0 24px" }}>
+        <div style={{ fontSize:52, marginBottom:12 }}>🔒</div>
+        <div style={{ fontFamily:"'Barlow Condensed'", fontWeight:800, fontSize:28, color:"#f97316", letterSpacing:3, marginBottom:4 }}>DAILY LOG</div>
+        <div style={{ fontSize:12, color:"rgba(255,255,255,.35)", marginBottom:36, letterSpacing:1 }}>ENTER YOUR PIN</div>
+
+        {/* Dots */}
+        <div style={{ display:"flex", justifyContent:"center", gap:14, marginBottom:36, animation: shake?"shake .5s ease":"none" }}>
+          {[0,1,2,3].map(i => (
+            <div key={i} style={{
+              width:16, height:16, borderRadius:"50%",
+              background: pin.length > i ? "#f97316" : "rgba(255,255,255,.12)",
+              border: pin.length > i ? "none" : "2px solid rgba(255,255,255,.2)",
+              transition:"background .15s",
+              boxShadow: pin.length > i ? "0 0 10px rgba(249,115,22,.6)" : "none",
+            }}/>
+          ))}
+        </div>
+
+        {/* Keypad */}
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10 }}>
+          {["1","2","3","4","5","6","7","8","9","","0","del"].map((k,i) => (
+            <button key={i} onClick={() => k && handleKey(k)} style={{
+              padding:"18px 0", border:"none", borderRadius:12,
+              background: k ? "rgba(255,255,255,.07)" : "transparent",
+              color: k==="del" ? "#f87171" : "#fff",
+              fontFamily:"'Barlow Condensed'", fontWeight:800,
+              fontSize: k==="del" ? 18 : 24,
+              cursor: k ? "pointer" : "default",
+              transition:"background .1s",
+              letterSpacing: k==="del" ? 0 : 1,
+            }}
+              onMouseDown={e => e.currentTarget.style.background = k ? "rgba(249,115,22,.25)" : "transparent"}
+              onMouseUp={e => e.currentTarget.style.background = k ? "rgba(255,255,255,.07)" : "transparent"}
+            >
+              {k === "del" ? "⌫" : k}
+            </button>
+          ))}
+        </div>
+
+        {attempts > 0 && (
+          <div style={{ marginTop:20, fontSize:11, color:"#f87171" }}>
+            Incorrect PIN — {attempts} attempt{attempts>1?"s":""}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 export default function App() {
   const today = new Date().toISOString().split("T")[0];
   const quoteIdx = useRef(Math.floor(Math.random() * QUOTES.length)).current;
 
-  const [theme,    setTheme]    = useState(() => store.get("wt_theme") || "dark");
-  const [logs,     setLogs]     = useState(() => store.get("wt_logs")  || []);
-  const [earned,   setEarned]   = useState(() => store.get("wt_earned")|| []);
-  const [profile,  setProfile]  = useState(() => store.get("wt_profile")|| { height:"", goal:"", unit:"cm" });
+  const [unlocked,  setUnlocked]  = useState(() => sessionStorage.getItem("wt_unlocked") === "1");
+  const [loading,   setLoading]   = useState(true);
+  const [syncing,   setSyncing]   = useState(false);
+
+  const [theme,    setTheme]    = useState("dark");
+  const [logs,     setLogs]     = useState([]);
+  const [earned,   setEarned]   = useState([]);
+  const [profile,  setProfile]  = useState({ height:"", goal:"", unit:"cm", calTarget:"" });
   const [tab,      setTab]      = useState("checkin");
   const [newBadge, setNewBadge] = useState(null);
+  const [predWeeks,setPredWeeks]= useState(12);
 
-  // Daily check-in fields
-  const [weight,   setWeight]   = useState("");
-  const [waist,    setWaist]    = useState("");
-  const [neck,     setNeck]     = useState("");
-  const [calories, setCalories] = useState("");
-  const [protein,  setProtein]  = useState("");
-  const [carbs,    setCarbs]    = useState("");
-  const [fat,      setFat]      = useState("");
-  const [photoSrc, setPhotoSrc] = useState(null);
+  // Check-in form state
+  const [weight,       setWeight]       = useState("");
+  const [waist,        setWaist]        = useState("");
+  const [neck,         setNeck]         = useState("");
+  const [calories,     setCalories]     = useState("");
+  const [protein,      setProtein]      = useState("");
+  const [carbs,        setCarbs]        = useState("");
+  const [fat,          setFat]          = useState("");
+  const [photoSrc,     setPhotoSrc]     = useState(null);
   const [photoCaption, setPhotoCaption] = useState("");
-  const [submitted, setSubmitted] = useState(false);
+  const [submitted,    setSubmitted]    = useState(false);
   const fileRef = useRef();
 
-  const isDark = theme === "dark";
-  const text   = isDark ? "#f0f0ff" : "#12122a";
-  const muted  = isDark ? "rgba(240,240,255,0.38)" : "rgba(0,0,0,0.38)";
-  const card   = isDark ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.9)";
-  const border = isDark ? "rgba(255,255,255,0.09)" : "rgba(0,0,0,0.08)";
-  const accent = "#f97316";
+  // ── LOAD FROM FIRESTORE on unlock ──────────────────────────────────────────
+  useEffect(() => {
+    if (!unlocked) { setLoading(false); return; }
 
-  // Pre-fill today if already logged
+    const unsubLogs = onSnapshot(
+      collection(db, "users", USER_ID, "logs"),
+      (snap) => {
+        const data = snap.docs.map(d => ({ ...d.data(), id: d.id }));
+        setLogs(data.sort((a,b) => new Date(b.date)-new Date(a.date)));
+        setLoading(false);
+      },
+      () => setLoading(false)
+    );
+
+    // Load profile & earned
+    getDoc(doc(db, "users", USER_ID, "meta", "profile")).then(d => {
+      if (d.exists()) setProfile(d.data());
+    });
+    getDoc(doc(db, "users", USER_ID, "meta", "earned")).then(d => {
+      if (d.exists()) setEarned(d.data().list || []);
+    });
+    getDoc(doc(db, "users", USER_ID, "meta", "theme")).then(d => {
+      if (d.exists()) setTheme(d.data().value || "dark");
+    });
+
+    return () => unsubLogs();
+  }, [unlocked]);
+
+  // Pre-fill today's form if already logged
   useEffect(() => {
     const ex = logs.find(l => l.date === today);
     if (ex) {
@@ -224,36 +303,35 @@ export default function App() {
       setPhotoSrc(ex.photo || null); setPhotoCaption(ex.photoCaption || "");
       setSubmitted(true);
     }
-  }, []);
+  }, [logs]);
 
-  const sorted       = [...logs].sort((a,b) => new Date(b.date)-new Date(a.date));
-  const chronological= [...logs].sort((a,b) => new Date(a.date)-new Date(b.date));
-  const latest       = sorted[0];
-  const streak       = computeStreak(logs);
-  const totalChange  = logs.length > 1 ? (sorted[0].weight - sorted[sorted.length-1].weight).toFixed(1) : null;
+  // ── FIRESTORE SAVERS ───────────────────────────────────────────────────────
+  const saveLog = async (entry) => {
+    setSyncing(true);
+    await setDoc(doc(db, "users", USER_ID, "logs", entry.date), entry);
+    setSyncing(false);
+  };
 
-  // Live body fat calc from current inputs + profile height
-  const liveHeightCm = profile.height
-    ? (profile.unit === "cm" ? parseFloat(profile.height) : parseFloat(profile.height) * 2.54)
-    : null;
-  const liveBF = liveHeightCm && waist && neck ? calcNavyBF(waist, neck, liveHeightCm) : null;
-  const liveBFCat = liveBF ? getBFCategory(liveBF) : null;
+  const deleteLog = async (date) => {
+    setSyncing(true);
+    await deleteDoc(doc(db, "users", USER_ID, "logs", date));
+    setSyncing(false);
+  };
 
-  const latestBF = latest?.bodyFat ?? null;
-  const latestBFCat = latestBF ? getBFCategory(latestBF) : null;
+  const saveProfile = async (p) => {
+    setProfile(p);
+    await setDoc(doc(db, "users", USER_ID, "meta", "profile"), p);
+  };
 
-  const bmi = latest && profile.height
-    ? (() => {
-        const hm = profile.unit === "cm" ? parseFloat(profile.height)/100 : parseFloat(profile.height)*0.0254;
-        const wkg = latest.weight; // stored as kg always
-        return (wkg / (hm*hm)).toFixed(1);
-      })()
-    : null;
-  const bmiCat = bmi ? getBMICat(bmi) : null;
+  const saveEarned = async (list) => {
+    setEarned(list);
+    await setDoc(doc(db, "users", USER_ID, "meta", "earned"), { list });
+  };
 
-  const bfChartData = chronological
-    .filter(l => l.bodyFat)
-    .map(l => ({ date: l.date.slice(5), bf: l.bodyFat }));
+  const saveTheme = async (t) => {
+    setTheme(t);
+    await setDoc(doc(db, "users", USER_ID, "meta", "theme"), { value: t });
+  };
 
   const handlePhoto = (e) => {
     const file = e.target.files[0]; if (!file) return;
@@ -262,29 +340,39 @@ export default function App() {
     reader.readAsDataURL(file);
   };
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     if (!weight) return;
+    const liveHeightCm = profile.height
+      ? (profile.unit === "cm" ? parseFloat(profile.height) : parseFloat(profile.height)*2.54)
+      : null;
+    const liveBF = liveHeightCm && waist && neck ? calcNavyBF(waist, neck, liveHeightCm) : null;
+
     const entry = {
-      id: Date.now(), date: today,
-      weight: parseFloat(weight),
-      waist: waist || null, neck: neck || null,
-      bodyFat: liveBF,
-      calories, protein, carbs, fat,
-      photo: photoSrc, photoCaption,
+      date: today, weight: parseFloat(weight),
+      waist: waist || null, neck: neck || null, bodyFat: liveBF,
+      calories: calories || null, protein: protein || null,
+      carbs: carbs || null, fat: fat || null,
+      photo: photoSrc || null, photoCaption: photoCaption || null,
     };
+    await saveLog(entry);
+
     const newLogs = [...logs.filter(l => l.date !== today), entry]
       .sort((a,b) => new Date(b.date)-new Date(a.date));
-    setLogs(newLogs); store.set("wt_logs", newLogs);
     const ne = checkMilestones(newLogs, earned);
     if (ne.length > earned.length) {
       const badge = MILESTONES.find(m => !earned.includes(m.id) && ne.includes(m.id));
       if (badge) { setNewBadge(badge); setTimeout(() => setNewBadge(null), 3500); }
-      setEarned(ne); store.set("wt_earned", ne);
+      await saveEarned(ne);
     }
     setSubmitted(true);
   };
 
-  const saveProfile = (p) => { setProfile(p); store.set("wt_profile", p); };
+  const handleSaveNutrition = async () => {
+    const existing = logs.find(l => l.date === today);
+    if (!existing) { alert("Save your check-in first!"); return; }
+    const updated = { ...existing, calories: calories||null, protein: protein||null, carbs: carbs||null, fat: fat||null };
+    await saveLog(updated);
+  };
 
   const exportCSV = () => {
     const rows = [["Date","Weight(kg)","Waist(cm)","Neck(cm)","BodyFat%","Calories","Protein","Carbs","Fat"],
@@ -293,6 +381,35 @@ export default function App() {
     a.href = URL.createObjectURL(new Blob([rows.map(r=>r.join(",")).join("\n")],{type:"text/csv"}));
     a.download = "daily-log.csv"; a.click();
   };
+
+  // ── DERIVED DATA ───────────────────────────────────────────────────────────
+  const sorted        = [...logs].sort((a,b) => new Date(b.date)-new Date(a.date));
+  const chronological = [...logs].sort((a,b) => new Date(a.date)-new Date(b.date));
+  const latest        = sorted[0];
+  const streak        = computeStreak(logs);
+  const totalChange   = logs.length > 1 ? (sorted[0].weight - sorted[sorted.length-1].weight).toFixed(1) : null;
+
+  const liveHeightCm = profile.height
+    ? (profile.unit === "cm" ? parseFloat(profile.height) : parseFloat(profile.height)*2.54)
+    : null;
+  const liveBF    = liveHeightCm && waist && neck ? calcNavyBF(waist, neck, liveHeightCm) : null;
+  const liveBFCat = liveBF ? getBFCategory(liveBF) : null;
+  const latestBF  = latest?.bodyFat ?? null;
+  const latestBFCat = latestBF ? getBFCategory(latestBF) : null;
+  const bmi = latest && profile.height
+    ? (() => { const hm = profile.unit==="cm" ? parseFloat(profile.height)/100 : parseFloat(profile.height)*0.0254; return (latest.weight/(hm*hm)).toFixed(1); })()
+    : null;
+  const bmiCat = bmi ? getBMICat(bmi) : null;
+  const bfChartData   = chronological.filter(l => l.bodyFat).map(l => ({ date: l.date.slice(5), bf: l.bodyFat }));
+  const prediction    = buildPrediction(logs, profile, predWeeks);
+  const todayComplete = weight && photoSrc;
+
+  const isDark = theme === "dark";
+  const text   = isDark ? "#f0f0ff" : "#12122a";
+  const muted  = isDark ? "rgba(240,240,255,0.38)" : "rgba(0,0,0,0.38)";
+  const card   = isDark ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.9)";
+  const border = isDark ? "rgba(255,255,255,0.09)" : "rgba(0,0,0,0.08)";
+  const accent = "#f97316";
 
   const inp = {
     width:"100%", padding:"11px 14px",
@@ -312,11 +429,29 @@ export default function App() {
     {id:"settings",   icon:"⚙️", label:"Settings"},
   ];
 
-  const [predWeeks, setPredWeeks] = useState(12);
-  const prediction = buildPrediction(logs, profile, predWeeks);
+  // ── PIN GATE ───────────────────────────────────────────────────────────────
+  if (!unlocked) {
+    return <PinScreen onUnlock={() => {
+      sessionStorage.setItem("wt_unlocked", "1");
+      setUnlocked(true);
+    }}/>;
+  }
 
-  const todayComplete = weight && photoSrc;
+  // ── LOADING ────────────────────────────────────────────────────────────────
+  if (loading) {
+    return (
+      <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center",
+        background:"radial-gradient(ellipse at 20% 0%, #1a0808 0%, #080810 70%)",
+        fontFamily:"'Barlow Condensed',sans-serif", color:"#f97316", fontSize:20, letterSpacing:2, flexDirection:"column", gap:14 }}>
+        <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@800&display=swap" rel="stylesheet"/>
+        <div style={{ fontSize:40, animation:"spin 1s linear infinite" }}>⚡</div>
+        <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
+        LOADING YOUR DATA...
+      </div>
+    );
+  }
 
+  // ── MAIN UI ────────────────────────────────────────────────────────────────
   return (
     <div style={{
       minHeight:"100vh",
@@ -327,7 +462,7 @@ export default function App() {
     }}>
       <link href="https://fonts.googleapis.com/css2?family=Barlow:ital,wght@0,400;0,500;0,600;0,700;1,400&family=Barlow+Condensed:wght@700;800&display=swap" rel="stylesheet"/>
       <style>{`
-        input[type=date],input[type=time]{color-scheme:${isDark?"dark":"light"}}
+        input[type=date]{color-scheme:${isDark?"dark":"light"}}
         input:focus{border-color:#f97316 !important; box-shadow:0 0 0 3px rgba(249,115,22,.12)}
         @keyframes slideDown{from{transform:translateY(-80px) scale(.9);opacity:0}to{transform:translateY(0) scale(1);opacity:1}}
         @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
@@ -336,27 +471,23 @@ export default function App() {
         .tab-btn:active{transform:scale(.95)}
       `}</style>
 
-      {/* ── BADGE TOAST ── */}
+      {/* BADGE TOAST */}
       {newBadge && (
-        <div style={{
-          position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",
-          zIndex:999,animation:"slideDown .45s cubic-bezier(.34,1.56,.64,1)",
+        <div style={{ position:"fixed",top:16,left:"50%",transform:"translateX(-50%)",zIndex:999,
+          animation:"slideDown .45s cubic-bezier(.34,1.56,.64,1)",
           background:"linear-gradient(135deg,#c2410c,#f97316)",
           borderRadius:20,padding:"16px 30px",textAlign:"center",
-          boxShadow:"0 16px 50px rgba(249,115,22,.55)",minWidth:250,
-        }}>
+          boxShadow:"0 16px 50px rgba(249,115,22,.55)",minWidth:250 }}>
           <div style={{fontSize:38}}>{newBadge.icon}</div>
           <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:20,color:"#fff",letterSpacing:2,marginTop:4}}>BADGE UNLOCKED</div>
           <div style={{fontSize:13,color:"rgba(255,255,255,.85)",marginTop:3}}>{newBadge.label} — {newBadge.desc}</div>
         </div>
       )}
 
-      {/* ── HEADER ── */}
-      <div style={{
-        background:isDark?"rgba(8,8,16,.9)":"rgba(255,255,255,.88)",
+      {/* HEADER */}
+      <div style={{ background:isDark?"rgba(8,8,16,.9)":"rgba(255,255,255,.88)",
         borderBottom:`1px solid ${border}`,backdropFilter:"blur(20px)",
-        position:"sticky",top:0,zIndex:10,
-      }}>
+        position:"sticky",top:0,zIndex:10 }}>
         <div style={{maxWidth:520,margin:"0 auto",padding:"13px 16px 11px"}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
             <div>
@@ -364,12 +495,15 @@ export default function App() {
               <div style={{fontSize:10,color:muted,letterSpacing:2}}>YOUR PERSONAL TRAINER</div>
             </div>
             <div style={{display:"flex",gap:8,alignItems:"center"}}>
-              {streak > 0 && (
+              {/* Sync indicator */}
+              {syncing && <div style={{fontSize:10,color:"#34d399",background:"rgba(52,211,153,.1)",border:"1px solid rgba(52,211,153,.2)",padding:"4px 10px",borderRadius:99}}>⚡ Syncing...</div>}
+              {streak > 0 && !syncing && (
                 <div style={{background:isDark?"rgba(251,191,36,.12)":"rgba(251,191,36,.2)",border:"1px solid rgba(251,191,36,.35)",borderRadius:99,padding:"5px 11px",fontSize:12,color:"#fbbf24",fontWeight:700}}>
                   🔥 {streak}d
                 </div>
               )}
-              <button onClick={()=>{const t=theme==="dark"?"light":"dark";setTheme(t);store.set("wt_theme",t);}} style={{background:isDark?"rgba(255,255,255,.08)":"rgba(0,0,0,.06)",border:"none",borderRadius:99,width:36,height:36,cursor:"pointer",fontSize:16}}>
+              <button onClick={()=>saveTheme(theme==="dark"?"light":"dark")}
+                style={{background:isDark?"rgba(255,255,255,.08)":"rgba(0,0,0,.06)",border:"none",borderRadius:99,width:36,height:36,cursor:"pointer",fontSize:16}}>
                 {isDark?"☀️":"🌙"}
               </button>
             </div>
@@ -382,14 +516,14 @@ export default function App() {
 
       <div style={{maxWidth:520,margin:"0 auto",padding:"12px 13px 90px"}}>
 
-        {/* ── STATS ROW ── */}
+        {/* STATS ROW */}
         {latest && (
           <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:13}}>
             {[
-              {label:"Weight",   val:`${latest.weight}`,                       sub:"kg",    icon:"⚖️", col:accent},
-              {label:"Body Fat", val:latestBF?`${latestBF}%`:"—",              sub:latestBFCat?.label||"log waist+neck", icon:"📏", col:"#a78bfa"},
+              {label:"Weight",   val:`${latest.weight}`,           sub:"kg",    icon:"⚖️", col:accent},
+              {label:"Body Fat", val:latestBF?`${latestBF}%`:"—", sub:latestBFCat?.label||"measure", icon:"📏", col:"#a78bfa"},
               {label:"Change",   val:totalChange?(parseFloat(totalChange)>0?`+${totalChange}`:totalChange):"—", sub:"kg", icon:parseFloat(totalChange)<0?"📉":"📈", col:parseFloat(totalChange)<0?"#34d399":"#fbbf24"},
-              {label:"Streak",   val:streak,                                   sub:"days",  icon:"🔥", col:"#fbbf24"},
+              {label:"Streak",   val:streak,                       sub:"days",  icon:"🔥", col:"#fbbf24"},
             ].map((s,i)=>(
               <div key={i} style={{background:card,border:`1px solid ${s.col}28`,borderRadius:12,padding:"10px 5px",textAlign:"center",backdropFilter:"blur(10px)"}}>
                 <div style={{fontSize:15}}>{s.icon}</div>
@@ -400,7 +534,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ── TABS ── */}
+        {/* TABS */}
         <div style={{display:"flex",gap:3,background:isDark?"rgba(255,255,255,.04)":"rgba(0,0,0,.04)",borderRadius:14,padding:4,marginBottom:15}}>
           {TABS.map(t=>(
             <button key={t.id} className="tab-btn" onClick={()=>setTab(t.id)} style={{
@@ -411,28 +545,26 @@ export default function App() {
           ))}
         </div>
 
-        {/* ════════════════════ CHECK-IN ════════════════════ */}
+        {/* ══ CHECK-IN ══ */}
         {tab==="checkin" && (
           <div style={{animation:"fadeUp .3s ease"}}>
-
             {submitted && todayComplete && (
               <div style={{marginBottom:13,padding:"13px 16px",background:"linear-gradient(135deg,rgba(52,211,153,.12),rgba(16,185,129,.08))",border:"1px solid rgba(52,211,153,.28)",borderRadius:14,display:"flex",alignItems:"center",gap:12}}>
                 <div style={{fontSize:26}}>✅</div>
                 <div>
                   <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:16,color:"#34d399",letterSpacing:1}}>TODAY'S CHECK-IN COMPLETE!</div>
-                  <div style={{fontSize:11,color:muted}}>Log your calories in the 🍎 Nutrition tab</div>
+                  <div style={{fontSize:11,color:muted}}>Log calories in the 🍎 Nutrition tab</div>
                 </div>
               </div>
             )}
 
-            {/* PHOTO */}
+            {/* Photo */}
             <div style={{background:card,border:`1px solid ${border}`,borderRadius:16,padding:17,marginBottom:11,backdropFilter:"blur(10px)"}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:11}}>
                 <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:13,color:accent,letterSpacing:1}}>📸 TODAY'S PHOTO</div>
                 {!photoSrc
                   ? <div style={{fontSize:10,color:"#f87171",fontWeight:700,background:"rgba(248,113,113,.1)",padding:"3px 8px",borderRadius:99}}>REQUIRED</div>
-                  : <div style={{fontSize:10,color:"#34d399",fontWeight:700,background:"rgba(52,211,153,.1)",padding:"3px 8px",borderRadius:99}}>✓ DONE</div>
-                }
+                  : <div style={{fontSize:10,color:"#34d399",fontWeight:700,background:"rgba(52,211,153,.1)",padding:"3px 8px",borderRadius:99}}>✓ DONE</div>}
               </div>
               {photoSrc ? (
                 <div>
@@ -444,15 +576,14 @@ export default function App() {
                 </div>
               ) : (
                 <button onClick={()=>fileRef.current.click()} style={{width:"100%",height:130,border:`2px dashed ${accent}44`,borderRadius:12,background:isDark?"rgba(249,115,22,.04)":"rgba(249,115,22,.03)",color:accent,cursor:"pointer",fontSize:13,fontWeight:600,display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:7}}>
-                  <span style={{fontSize:32}}>📷</span>
-                  <span>Tap to upload today's photo</span>
+                  <span style={{fontSize:32}}>📷</span><span>Tap to upload today's photo</span>
                   <span style={{fontSize:10,color:muted,fontWeight:400}}>Front or side pose works best</span>
                 </button>
               )}
               <input ref={fileRef} type="file" accept="image/*" onChange={handlePhoto} style={{display:"none"}}/>
             </div>
 
-            {/* WEIGHT */}
+            {/* Weight */}
             <div style={{background:card,border:`1px solid ${border}`,borderRadius:16,padding:17,marginBottom:11,backdropFilter:"blur(10px)"}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:11}}>
                 <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:13,color:accent,letterSpacing:1}}>⚖️ WEIGHT</div>
@@ -464,8 +595,8 @@ export default function App() {
               <div style={{fontSize:10,color:muted,textAlign:"center",marginTop:6}}>in kilograms (kg)</div>
             </div>
 
-            {/* BODY FAT CALCULATOR */}
-            <div style={{background:card,border:`1px solid rgba(167,139,250,.25)`,borderRadius:16,padding:17,marginBottom:11,backdropFilter:"blur(10px)"}}>
+            {/* Body Fat Calculator */}
+            <div style={{background:card,border:"1px solid rgba(167,139,250,.25)",borderRadius:16,padding:17,marginBottom:11,backdropFilter:"blur(10px)"}}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
                 <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:13,color:"#a78bfa",letterSpacing:1}}>📏 BODY FAT CALCULATOR</div>
                 <div style={{fontSize:9,color:muted,background:isDark?"rgba(167,139,250,.1)":"rgba(167,139,250,.12)",padding:"3px 8px",borderRadius:99}}>U.S. NAVY METHOD</div>
@@ -473,7 +604,6 @@ export default function App() {
               <div style={{fontSize:11,color:muted,marginBottom:12}}>
                 Measure around the <b style={{color:text}}>widest part of your belly</b> and around your <b style={{color:text}}>neck below the Adam's apple</b>
               </div>
-
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
                 <div>
                   <label style={{fontSize:10,color:muted,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:.5}}>Waist (cm)</label>
@@ -488,18 +618,11 @@ export default function App() {
                     style={{...inp,borderColor:neck?"#a78bfa":border,textAlign:"center",fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:22}}/>
                 </div>
               </div>
-
-              {/* Live result */}
               {liveBF ? (
-                <div style={{
-                  padding:"14px 16px",borderRadius:12,textAlign:"center",
-                  background:`${liveBFCat.color}12`,border:`1px solid ${liveBFCat.color}35`,
-                  animation:"bfPulse .3s ease",
-                }}>
+                <div style={{padding:"14px 16px",borderRadius:12,textAlign:"center",background:`${liveBFCat.color}12`,border:`1px solid ${liveBFCat.color}35`,animation:"bfPulse .3s ease"}}>
                   <div style={{fontSize:10,color:muted,textTransform:"uppercase",letterSpacing:1,marginBottom:2}}>YOUR BODY FAT</div>
                   <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:44,color:liveBFCat.color,lineHeight:1}}>{liveBF}<span style={{fontSize:20}}>%</span></div>
                   <div style={{fontSize:13,color:liveBFCat.color,fontWeight:600,marginTop:3}}>{liveBFCat.label}</div>
-                  {/* Bar */}
                   <div style={{marginTop:10,height:6,borderRadius:99,overflow:"hidden",background:isDark?"rgba(255,255,255,.08)":"rgba(0,0,0,.08)"}}>
                     <div style={{height:"100%",width:`${liveBFCat.bar}%`,background:liveBFCat.color,borderRadius:99,transition:"width .5s ease"}}/>
                   </div>
@@ -509,17 +632,16 @@ export default function App() {
                 </div>
               ) : (
                 <div style={{padding:"12px",borderRadius:10,background:isDark?"rgba(255,255,255,.04)":"rgba(0,0,0,.03)",textAlign:"center",fontSize:12,color:muted}}>
-                  {!profile.height
-                    ? "⚠️ Set your height in Settings first"
-                    : (!waist && !neck) ? "Enter waist & neck to auto-calculate your body fat %"
-                    : waist && !neck ? "Now enter your neck measurement"
-                    : !waist && neck ? "Now enter your waist measurement"
-                    : "Waist must be greater than neck — check your measurements"}
+                  {!profile.height ? "⚠️ Set your height in Settings first"
+                    : (!waist&&!neck) ? "Enter waist & neck to auto-calculate body fat %"
+                    : waist&&!neck ? "Now enter your neck measurement"
+                    : !waist&&neck ? "Now enter your waist measurement"
+                    : "Waist must be greater than neck"}
                 </div>
               )}
             </div>
 
-            {/* SAVE BUTTON */}
+            {/* Save */}
             <button onClick={handleSubmit} disabled={!weight} style={{
               width:"100%",padding:"15px",border:"none",borderRadius:14,
               background:weight?"linear-gradient(135deg,#c2410c,#f97316)":isDark?"rgba(255,255,255,.07)":"rgba(0,0,0,.07)",
@@ -528,16 +650,15 @@ export default function App() {
               cursor:weight?"pointer":"not-allowed",transition:"all .2s",
               boxShadow:weight?"0 6px 24px rgba(249,115,22,.35)":"none",
             }}>{submitted?"✓ UPDATE CHECK-IN":"SAVE CHECK-IN"}</button>
-
             {!todayComplete&&(
               <div style={{marginTop:8,textAlign:"center",fontSize:11,color:muted}}>
-                Still needed: {[!photoSrc&&"📷 Photo",!weight&&"⚖️ Weight"].filter(Boolean).join("  •  ")}
+                Still needed: {[!photoSrc&&"📷 Photo",!weight&&"⚖️ Weight"].filter(Boolean).join(" • ")}
               </div>
             )}
           </div>
         )}
 
-        {/* ════════════════════ NUTRITION ════════════════════ */}
+        {/* ══ NUTRITION ══ */}
         {tab==="nutrition" && (
           <div style={{animation:"fadeUp .3s ease"}}>
             <div style={{background:card,border:`1px solid ${border}`,borderRadius:16,padding:18,backdropFilter:"blur(10px)"}}>
@@ -545,62 +666,45 @@ export default function App() {
                 <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:14,color:"#fbbf24",letterSpacing:1}}>🔥 CALORIES & MACROS</div>
                 <div style={{fontSize:10,color:muted,background:isDark?"rgba(251,191,36,.1)":"rgba(251,191,36,.12)",padding:"3px 8px",borderRadius:99}}>OPTIONAL</div>
               </div>
-              <div style={{fontSize:11,color:muted,marginBottom:14}}>Track today's nutrition — logs are saved alongside your check-in</div>
-
+              <div style={{fontSize:11,color:muted,marginBottom:14}}>Track today's nutrition — saved alongside your check-in</div>
               <div style={{marginBottom:12}}>
                 <label style={{fontSize:10,color:muted,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:.5}}>Total Calories (kcal)</label>
                 <input type="number" placeholder="e.g. 1800" value={calories}
-                  onChange={e=>{setCalories(e.target.value);}}
+                  onChange={e=>setCalories(e.target.value)}
                   style={{...inp,fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:26,borderColor:calories?"#fbbf24":border}}/>
               </div>
-
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
                 {[["Protein (g)",protein,setProtein,"#60a5fa"],["Carbs (g)",carbs,setCarbs,"#fbbf24"],["Fat (g)",fat,setFat,"#f87171"]].map(([label,val,setter,col])=>(
                   <div key={label}>
                     <label style={{fontSize:9,color:muted,display:"block",marginBottom:4,textTransform:"uppercase",letterSpacing:.5}}>{label}</label>
-                    <input type="number" placeholder="0" value={val}
-                      onChange={e=>setter(e.target.value)}
+                    <input type="number" placeholder="0" value={val} onChange={e=>setter(e.target.value)}
                       style={{...inp,borderColor:`${col}44`,textAlign:"center"}}/>
                   </div>
                 ))}
               </div>
-
-              {/* Macro bar */}
               {protein&&carbs&&fat&&(
                 <div style={{marginBottom:14}}>
                   <div style={{height:8,borderRadius:99,overflow:"hidden",display:"flex",gap:1}}>
                     {(()=>{const p=(parseFloat(protein)||0)*4,c=(parseFloat(carbs)||0)*4,f=(parseFloat(fat)||0)*9,t=p+c+f||1;
-                      return[[p,"#60a5fa"],[c,"#fbbf24"],[f,"#f87171"]].map(([v,col],i)=>(
-                        <div key={i} style={{flex:v/t,background:col,transition:"flex .4s"}}/>
-                      ));
+                      return[[p,"#60a5fa"],[c,"#fbbf24"],[f,"#f87171"]].map(([v,col],i)=>(<div key={i} style={{flex:v/t,background:col,transition:"flex .4s"}}/>));
                     })()}
                   </div>
                   <div style={{display:"flex",gap:14,marginTop:6}}>
                     {[["Protein","#60a5fa",protein+"g"],["Carbs","#fbbf24",carbs+"g"],["Fat","#f87171",fat+"g"]].map(([l,c,v])=>(
                       <div key={l} style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:muted}}>
-                        <div style={{width:8,height:8,borderRadius:99,background:c}}/>
-                        {l}: <b style={{color:text}}>{v}</b>
+                        <div style={{width:8,height:8,borderRadius:99,background:c}}/>{l}: <b style={{color:text}}>{v}</b>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
-
-              {/* Calorie target indicator */}
               {calories && profile.calTarget && (
-                <div style={{padding:"10px 14px",borderRadius:10,background:isDark?"rgba(251,191,36,.08)":"rgba(251,191,36,.07)",border:"1px solid rgba(251,191,36,.2)",fontSize:12,color:"#fbbf24"}}>
-                  {parseFloat(calories) <= parseFloat(profile.calTarget) ? "✅ Under target" : "⚠️ Over target"} — {Math.abs(parseFloat(calories) - parseFloat(profile.calTarget))} kcal {parseFloat(calories) <= parseFloat(profile.calTarget) ? "remaining" : "over"}
+                <div style={{padding:"10px 14px",borderRadius:10,background:isDark?"rgba(251,191,36,.08)":"rgba(251,191,36,.07)",border:"1px solid rgba(251,191,36,.2)",fontSize:12,color:"#fbbf24",marginBottom:14}}>
+                  {parseFloat(calories)<=parseFloat(profile.calTarget)?"✅ Under target":"⚠️ Over target"} — {Math.abs(parseFloat(calories)-parseFloat(profile.calTarget))} kcal {parseFloat(calories)<=parseFloat(profile.calTarget)?"remaining":"over"}
                 </div>
               )}
-
-              <button onClick={()=>{
-                const existing = logs.find(l=>l.date===today);
-                if (!existing) { alert("Save your check-in first!"); return; }
-                const updated = {...existing, calories, protein, carbs, fat};
-                const newLogs = [...logs.filter(l=>l.date!==today), updated].sort((a,b)=>new Date(b.date)-new Date(a.date));
-                setLogs(newLogs); store.set("wt_logs", newLogs);
-              }} style={{
-                width:"100%",padding:"13px",border:"none",borderRadius:12,marginTop:4,
+              <button onClick={handleSaveNutrition} style={{
+                width:"100%",padding:"13px",border:"none",borderRadius:12,
                 background:calories?"linear-gradient(135deg,#b45309,#fbbf24)":isDark?"rgba(255,255,255,.07)":"rgba(0,0,0,.07)",
                 color:calories?"#000":muted,
                 fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:18,letterSpacing:2,
@@ -608,55 +712,42 @@ export default function App() {
               }}>SAVE NUTRITION</button>
               <div style={{marginTop:6,fontSize:10,color:muted,textAlign:"center"}}>Requires check-in to be saved first</div>
             </div>
-
-            {/* Calorie goal setting */}
             <div style={{background:card,border:`1px solid ${border}`,borderRadius:16,padding:18,marginTop:12,backdropFilter:"blur(10px)"}}>
               <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:13,color:"#fbbf24",letterSpacing:1,marginBottom:10}}>🎯 DAILY CALORIE TARGET</div>
               <input type="number" placeholder="e.g. 2000" value={profile.calTarget||""}
                 onChange={e=>saveProfile({...profile,calTarget:e.target.value})}
                 style={{...inp,fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:22}}/>
-              <div style={{marginTop:6,fontSize:11,color:muted}}>Set your daily target to track if you're over or under</div>
+              <div style={{marginTop:6,fontSize:11,color:muted}}>Set a target to track if you're over or under each day</div>
             </div>
           </div>
         )}
 
-        {/* ════════════════════ PREDICT ════════════════════ */}
+        {/* ══ PREDICT ══ */}
         {tab==="predict" && (
-          <div style={{animation:"fadeUp .3s ease", display:"flex", flexDirection:"column", gap:12}}>
-
-            {/* Needs data notice */}
-            {!prediction && (
+          <div style={{animation:"fadeUp .3s ease",display:"flex",flexDirection:"column",gap:12}}>
+            {!prediction ? (
               <div style={{background:card,border:`1px solid ${border}`,borderRadius:16,padding:24,backdropFilter:"blur(10px)",textAlign:"center"}}>
                 <div style={{fontSize:40,marginBottom:10}}>🔮</div>
                 <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:18,color:"#34d399",letterSpacing:1,marginBottom:8}}>PREDICTION NOT READY YET</div>
                 <div style={{fontSize:12,color:muted,lineHeight:1.7}}>
-                  To unlock fat-loss predictions, log at least:<br/>
-                  <b style={{color:text}}>1 check-in</b> with weight + waist + neck measurements<br/>
-                  <b style={{color:text}}>1 calorie entry</b> in the 🍎 Nutrition tab
+                  Log at least <b style={{color:text}}>1 check-in</b> with weight<br/>
+                  and <b style={{color:text}}>1 calorie entry</b> in the 🍎 Nutrition tab
                 </div>
               </div>
-            )}
-
-            {prediction && (() => {
+            ) : (() => {
               const { points, tdee, avgCal, dailyDeficit, weeklyFatLossKg, startWeight, startBF } = prediction;
-              const isDeficit = dailyDeficit && dailyDeficit > 0;
+              const isDeficit = dailyDeficit > 0;
               const goalWeight = profile.goal ? parseFloat(profile.goal) : null;
-              const weeksToGoal = goalWeight && weeklyFatLossKg > 0
-                ? Math.ceil((startWeight - goalWeight) / weeklyFatLossKg)
-                : null;
-              const goalDate = weeksToGoal
-                ? (() => { const d = new Date(); d.setDate(d.getDate() + weeksToGoal * 7); return d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}); })()
-                : null;
-
+              const weeksToGoal = goalWeight && weeklyFatLossKg > 0 ? Math.ceil((startWeight - goalWeight) / weeklyFatLossKg) : null;
+              const goalDate = weeksToGoal ? (() => { const d = new Date(); d.setDate(d.getDate()+weeksToGoal*7); return d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"}); })() : null;
               return (
                 <>
-                  {/* Summary cards */}
                   <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
                     {[
-                      {label:"Your TDEE",        val:`${tdee || "?"}`,                        sub:"kcal/day maintenance", icon:"⚡", col:"#60a5fa"},
-                      {label:"Avg Intake",        val:avgCal?`${Math.round(avgCal)}`:"?",      sub:"kcal/day (last 7)",    icon:"🍽️", col:"#fbbf24"},
-                      {label:"Daily Deficit",     val:dailyDeficit?`${Math.abs(Math.round(dailyDeficit))}`:"?", sub:isDeficit?"kcal deficit":"kcal surplus", icon:isDeficit?"📉":"📈", col:isDeficit?"#34d399":"#f87171"},
-                      {label:"Weekly Fat Loss",   val:weeklyFatLossKg?`${weeklyFatLossKg>0?weeklyFatLossKg.toFixed(2):"0"}`:"?", sub:"kg per week", icon:"🔥", col:isDeficit?"#34d399":"#f87171"},
+                      {label:"Your TDEE",      val:`${tdee}`,                  sub:"kcal/day maintenance",  icon:"⚡", col:"#60a5fa"},
+                      {label:"Avg Intake",     val:`${avgCal}`,                sub:"kcal/day (last 7)",      icon:"🍽️", col:"#fbbf24"},
+                      {label:"Daily Deficit",  val:`${Math.abs(Math.round(dailyDeficit))}`, sub:isDeficit?"kcal deficit":"kcal surplus", icon:isDeficit?"📉":"📈", col:isDeficit?"#34d399":"#f87171"},
+                      {label:"Weekly Fat Loss",val:weeklyFatLossKg>0?`${weeklyFatLossKg.toFixed(2)}`:"0",  sub:"kg per week",            icon:"🔥", col:isDeficit?"#34d399":"#f87171"},
                     ].map((s,i)=>(
                       <div key={i} style={{background:card,border:`1px solid ${s.col}28`,borderRadius:12,padding:"13px 14px",backdropFilter:"blur(10px)"}}>
                         <div style={{fontSize:18,marginBottom:4}}>{s.icon}</div>
@@ -666,8 +757,6 @@ export default function App() {
                       </div>
                     ))}
                   </div>
-
-                  {/* Goal ETA */}
                   {goalDate && weeklyFatLossKg > 0 && (
                     <div style={{background:"linear-gradient(135deg,rgba(52,211,153,.12),rgba(16,185,129,.07))",border:"1px solid rgba(52,211,153,.3)",borderRadius:14,padding:"16px 18px",display:"flex",alignItems:"center",gap:14}}>
                       <div style={{fontSize:32}}>🎯</div>
@@ -678,35 +767,27 @@ export default function App() {
                       </div>
                     </div>
                   )}
-
-                  {/* Surplus warning */}
-                  {!isDeficit && avgCal && (
+                  {!isDeficit && (
                     <div style={{background:"rgba(248,113,113,.08)",border:"1px solid rgba(248,113,113,.25)",borderRadius:14,padding:"14px 16px",display:"flex",alignItems:"center",gap:12}}>
                       <div style={{fontSize:28}}>⚠️</div>
                       <div>
                         <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:14,color:"#f87171",letterSpacing:1}}>YOU'RE IN A CALORIE SURPLUS</div>
-                        <div style={{fontSize:11,color:"rgba(255,255,255,.4)",marginTop:2}}>Eating {Math.abs(Math.round(dailyDeficit))} kcal above maintenance. Reduce intake or increase activity to lose fat.</div>
+                        <div style={{fontSize:11,color:"rgba(255,255,255,.4)",marginTop:2}}>Eating {Math.abs(Math.round(dailyDeficit))} kcal above maintenance. Reduce intake to lose fat.</div>
                       </div>
                     </div>
                   )}
-
-                  {/* Projection chart */}
                   <div style={{background:card,border:"1px solid rgba(52,211,153,.2)",borderRadius:16,padding:18,backdropFilter:"blur(10px)"}}>
-                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
-                      <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:14,color:"#34d399",letterSpacing:1}}>📈 PROJECTION CHART</div>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                      <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:14,color:"#34d399",letterSpacing:1}}>📈 PROJECTION</div>
                       <div style={{display:"flex",gap:4}}>
                         {[4,8,12,16].map(w=>(
-                          <button key={w} onClick={()=>setPredWeeks(w)} style={{
-                            padding:"3px 9px",border:"none",borderRadius:99,fontSize:10,fontWeight:700,cursor:"pointer",
-                            background:predWeeks===w?"#34d399":isDark?"rgba(255,255,255,.08)":"rgba(0,0,0,.07)",
-                            color:predWeeks===w?"#000":muted,
-                          }}>{w}w</button>
+                          <button key={w} onClick={()=>setPredWeeks(w)} style={{padding:"3px 9px",border:"none",borderRadius:99,fontSize:10,fontWeight:700,cursor:"pointer",background:predWeeks===w?"#34d399":isDark?"rgba(255,255,255,.08)":"rgba(0,0,0,.07)",color:predWeeks===w?"#000":muted}}>{w}w</button>
                         ))}
                       </div>
                     </div>
-                    <div style={{fontSize:10,color:muted,marginBottom:12}}>
-                      <span style={{color:"#34d399"}}>── Weight (kg)</span>
-                      {startBF && <span style={{color:"#a78bfa",marginLeft:12}}>── Body Fat %</span>}
+                    <div style={{fontSize:10,color:muted,marginBottom:10}}>
+                      <span style={{color:"#34d399"}}>── Weight</span>
+                      {startBF&&<span style={{color:"#a78bfa",marginLeft:12}}>── Body Fat %</span>}
                     </div>
                     <ResponsiveContainer width="100%" height={200}>
                       <LineChart data={points} margin={{top:5,right:5,bottom:5,left:-20}}>
@@ -714,51 +795,31 @@ export default function App() {
                         <XAxis dataKey="date" tick={{fontSize:9,fill:muted}} tickLine={false} axisLine={false}/>
                         <YAxis tick={{fontSize:9,fill:muted}} tickLine={false} axisLine={false} domain={["auto","auto"]}/>
                         <Tooltip content={<PredictTooltip/>}/>
-                        {goalWeight && <ReferenceLine y={goalWeight} stroke="#34d399" strokeDasharray="4 4" label={{value:"Goal",fill:"#34d399",fontSize:9,position:"right"}}/>}
+                        {goalWeight&&<ReferenceLine y={goalWeight} stroke="#34d399" strokeDasharray="4 4" label={{value:"Goal",fill:"#34d399",fontSize:9,position:"right"}}/>}
                         <Line type="monotone" dataKey="predWeight" stroke="#34d399" strokeWidth={2.5} strokeDasharray="6 3" dot={false} name="predWeight"/>
-                        {startBF && <Line type="monotone" dataKey="predBF" stroke="#a78bfa" strokeWidth={2} strokeDasharray="4 4" dot={false} name="predBF"/>}
+                        {startBF&&<Line type="monotone" dataKey="predBF" stroke="#a78bfa" strokeWidth={2} strokeDasharray="4 4" dot={false} name="predBF"/>}
                       </LineChart>
                     </ResponsiveContainer>
                     <div style={{marginTop:8,padding:"8px 12px",background:isDark?"rgba(255,255,255,.04)":"rgba(0,0,0,.03)",borderRadius:8,fontSize:10,color:muted,textAlign:"center"}}>
                       ⚠️ Estimates only — actual results depend on metabolism, activity & adherence
                     </div>
                   </div>
-
-                  {/* End-of-period projection */}
-                  {weeklyFatLossKg > 0 && (
-                    <div style={{background:card,border:`1px solid ${border}`,borderRadius:16,padding:18,backdropFilter:"blur(10px)"}}>
-                      <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:13,color:"#34d399",letterSpacing:1,marginBottom:12}}>IN {predWeeks} WEEKS AT THIS RATE</div>
-                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10}}>
-                        {[
-                          {label:"Predicted Weight", val:`${Math.max(40,startWeight-weeklyFatLossKg*predWeeks).toFixed(1)} kg`, col:"#34d399"},
-                          {label:"Fat Lost", val:`${(weeklyFatLossKg*predWeeks).toFixed(1)} kg`, col:"#f97316"},
-                          startBF ? {label:"Predicted BF%", val:`${Math.max(4,startBF-(weeklyFatLossKg*predWeeks/(startWeight*(startBF/100))*100*0.8)).toFixed(1)}%`, col:"#a78bfa"} : null,
-                          {label:"Calorie Deficit", val:`${Math.round(dailyDeficit*7*predWeeks).toLocaleString()} kcal`, col:"#60a5fa"},
-                        ].filter(Boolean).map((s,i)=>(
-                          <div key={i} style={{padding:"12px",background:isDark?"rgba(255,255,255,.04)":"rgba(0,0,0,.04)",borderRadius:10}}>
-                            <div style={{fontSize:10,color:muted,textTransform:"uppercase",letterSpacing:.4,marginBottom:3}}>{s.label}</div>
-                            <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:22,color:s.col}}>{s.val}</div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
                 </>
               );
             })()}
           </div>
         )}
 
-        {/* ════════════════════ BODY FAT CHART ════════════════════ */}
+        {/* ══ BODY FAT CHART ══ */}
         {tab==="bodyfat" && (
           <div style={{animation:"fadeUp .3s ease",display:"flex",flexDirection:"column",gap:12}}>
-            <div style={{background:card,border:`1px solid rgba(167,139,250,.2)`,borderRadius:16,padding:18,backdropFilter:"blur(10px)"}}>
+            <div style={{background:card,border:"1px solid rgba(167,139,250,.2)",borderRadius:16,padding:18,backdropFilter:"blur(10px)"}}>
               <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:14,color:"#a78bfa",letterSpacing:1,marginBottom:3}}>📊 BODY FAT % TREND</div>
               <div style={{fontSize:11,color:muted,marginBottom:14}}>Calculated daily via U.S. Navy Method (waist + neck)</div>
               {bfChartData.length < 2 ? (
                 <div style={{textAlign:"center",padding:"40px 0",color:muted}}>
                   <div style={{fontSize:36,marginBottom:8}}>📏</div>
-                  <div style={{fontSize:13}}>Enter waist & neck in at least 2<br/>check-ins to see your trend</div>
+                  <div style={{fontSize:13}}>Enter waist & neck in at least 2 check-ins</div>
                 </div>
               ) : (
                 <ResponsiveContainer width="100%" height={210}>
@@ -772,8 +833,6 @@ export default function App() {
                 </ResponsiveContainer>
               )}
             </div>
-
-            {/* Latest reading */}
             {latestBF && (
               <div style={{background:card,border:`1px solid ${latestBFCat.color}30`,borderRadius:16,padding:18,backdropFilter:"blur(10px)",textAlign:"center"}}>
                 <div style={{fontSize:10,color:muted,textTransform:"uppercase",letterSpacing:1}}>Latest Reading</div>
@@ -784,8 +843,6 @@ export default function App() {
                 </div>
               </div>
             )}
-
-            {/* Reference */}
             <div style={{background:card,border:`1px solid ${border}`,borderRadius:16,padding:18,backdropFilter:"blur(10px)"}}>
               <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:13,color:"#a78bfa",letterSpacing:1,marginBottom:10}}>MALE BODY FAT REFERENCE</div>
               {[["Essential Fat","2–5%","#60a5fa"],["Athlete","6–13%","#34d399"],["Fitness","14–17%","#a78bfa"],["Acceptable","18–24%","#fbbf24"],["Obese","25%+","#f87171"]].map(([cat,range,col])=>(
@@ -801,17 +858,16 @@ export default function App() {
           </div>
         )}
 
-        {/* ════════════════════ HISTORY ════════════════════ */}
+        {/* ══ HISTORY ══ */}
         {tab==="history" && (
           <div style={{animation:"fadeUp .3s ease"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
               <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:14,color:accent,letterSpacing:1}}>🗓 ALL CHECK-INS</div>
-              {logs.length>0&&<button onClick={exportCSV} style={{padding:"6px 14px",background:"linear-gradient(135deg,#c2410c,#f97316)",border:"none",borderRadius:99,color:"#fff",fontSize:11,cursor:"pointer",fontWeight:700,letterSpacing:.5}}>⬇ CSV</button>}
+              {logs.length>0&&<button onClick={exportCSV} style={{padding:"6px 14px",background:"linear-gradient(135deg,#c2410c,#f97316)",border:"none",borderRadius:99,color:"#fff",fontSize:11,cursor:"pointer",fontWeight:700}}>⬇ CSV</button>}
             </div>
             {sorted.length===0 ? (
               <div style={{textAlign:"center",padding:"50px 20px",color:muted}}>
-                <div style={{fontSize:40,marginBottom:10}}>🗓</div>
-                <div>No entries yet. Start your first check-in!</div>
+                <div style={{fontSize:40,marginBottom:10}}>🗓</div><div>No entries yet!</div>
               </div>
             ) : (
               <div style={{display:"flex",flexDirection:"column",gap:10}}>
@@ -819,7 +875,7 @@ export default function App() {
                   const prev=sorted[i+1];
                   const diff=prev?(entry.weight-prev.weight).toFixed(1):null;
                   return (
-                    <div key={entry.id} style={{background:card,border:`1px solid ${border}`,borderRadius:14,overflow:"hidden",backdropFilter:"blur(10px)"}}>
+                    <div key={entry.date} style={{background:card,border:`1px solid ${border}`,borderRadius:14,overflow:"hidden",backdropFilter:"blur(10px)"}}>
                       <div style={{display:"flex"}}>
                         {entry.photo&&<img src={entry.photo} alt="" style={{width:78,objectFit:"cover",flexShrink:0}}/>}
                         <div style={{flex:1,padding:"12px 13px"}}>
@@ -839,7 +895,7 @@ export default function App() {
                                   {parseFloat(diff)>0?"+":""}{diff}
                                 </div>
                               )}
-                              <button onClick={()=>{const nl=logs.filter(l=>l.id!==entry.id);setLogs(nl);store.set("wt_logs",nl);}} style={{background:"rgba(248,113,113,.1)",border:"1px solid rgba(248,113,113,.2)",borderRadius:8,color:"#f87171",padding:"4px 8px",cursor:"pointer",fontSize:11}}>✕</button>
+                              <button onClick={()=>deleteLog(entry.date)} style={{background:"rgba(248,113,113,.1)",border:"1px solid rgba(248,113,113,.2)",borderRadius:8,color:"#f87171",padding:"4px 8px",cursor:"pointer",fontSize:11}}>✕</button>
                             </div>
                           </div>
                         </div>
@@ -852,7 +908,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ════════════════════ MILESTONES ════════════════════ */}
+        {/* ══ MILESTONES ══ */}
         {tab==="milestones" && (
           <div style={{animation:"fadeUp .3s ease"}}>
             <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:14,color:accent,letterSpacing:1,marginBottom:12}}>
@@ -876,22 +932,19 @@ export default function App() {
           </div>
         )}
 
-        {/* ════════════════════ SETTINGS ════════════════════ */}
+        {/* ══ SETTINGS ══ */}
         {tab==="settings" && (
           <div style={{animation:"fadeUp .3s ease",display:"flex",flexDirection:"column",gap:12}}>
             <div style={{background:card,border:`1px solid ${border}`,borderRadius:16,padding:18,backdropFilter:"blur(10px)"}}>
               <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:14,color:accent,letterSpacing:1,marginBottom:14}}>⚙️ YOUR PROFILE</div>
-
               <div style={{marginBottom:12,padding:"11px 14px",background:"rgba(167,139,250,.08)",border:"1px solid rgba(167,139,250,.2)",borderRadius:10,fontSize:12,color:"#a78bfa"}}>
-                <b>📏 Important:</b> Your height is needed to calculate body fat. Enter it below.
+                <b>📏 Important:</b> Your height is needed to calculate body fat.
               </div>
-
               <div style={{marginBottom:12}}>
                 <label style={{fontSize:10,color:muted,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:.5}}>Height</label>
                 <div style={{display:"flex",gap:8}}>
                   <input type="number" placeholder={profile.unit==="cm"?"e.g. 178":"e.g. 70"}
-                    value={profile.height} onChange={e=>saveProfile({...profile,height:e.target.value})}
-                    style={{...inp,flex:1}}/>
+                    value={profile.height} onChange={e=>saveProfile({...profile,height:e.target.value})} style={{...inp,flex:1}}/>
                   <div style={{display:"flex",gap:4}}>
                     {["cm","in"].map(u=>(
                       <button key={u} onClick={()=>saveProfile({...profile,unit:u})} style={{
@@ -904,13 +957,11 @@ export default function App() {
                   </div>
                 </div>
               </div>
-
               <div style={{marginBottom:12}}>
                 <label style={{fontSize:10,color:muted,display:"block",marginBottom:5,textTransform:"uppercase",letterSpacing:.5}}>Goal Weight (kg)</label>
                 <input type="number" placeholder="e.g. 75" value={profile.goal}
                   onChange={e=>saveProfile({...profile,goal:e.target.value})} style={inp}/>
               </div>
-
               {bmi&&(
                 <div style={{marginTop:4,padding:"12px 16px",borderRadius:10,background:`${bmiCat.color}11`,border:`1px solid ${bmiCat.color}33`}}>
                   <div style={{fontSize:10,color:muted,textTransform:"uppercase",letterSpacing:.5}}>Current BMI</div>
@@ -920,13 +971,20 @@ export default function App() {
               )}
             </div>
 
+            {/* PIN change hint */}
+            <div style={{background:card,border:`1px solid ${border}`,borderRadius:16,padding:18,backdropFilter:"blur(10px)"}}>
+              <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:14,color:"#a78bfa",letterSpacing:1,marginBottom:8}}>🔒 PIN</div>
+              <div style={{fontSize:12,color:muted}}>Your current PIN is set in the code. To change it, update <code style={{color:"#a78bfa",background:"rgba(167,139,250,.1)",padding:"2px 6px",borderRadius:4}}>CORRECT_PIN</code> in App.jsx and redeploy.</div>
+            </div>
+
             <div style={{background:card,border:`1px solid ${border}`,borderRadius:16,padding:18,backdropFilter:"blur(10px)"}}>
               <div style={{fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:14,color:"#34d399",letterSpacing:1,marginBottom:12}}>📤 EXPORT DATA</div>
               <button onClick={exportCSV} style={{width:"100%",padding:"13px",border:"none",borderRadius:10,background:"linear-gradient(135deg,#059669,#34d399)",color:"#fff",fontFamily:"'Barlow Condensed'",fontWeight:800,fontSize:18,letterSpacing:2,cursor:"pointer"}}>⬇ DOWNLOAD CSV</button>
-              <div style={{marginTop:8,fontSize:11,color:muted,textAlign:"center"}}>{logs.length} entries • weight, body fat %, calories & macros</div>
+              <div style={{marginTop:8,fontSize:11,color:muted,textAlign:"center"}}>{logs.length} entries synced to cloud ☁️</div>
             </div>
           </div>
         )}
+
       </div>
     </div>
   );
