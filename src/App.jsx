@@ -348,14 +348,14 @@ export default function App() {
 
   const handleSubmit = async () => {
     if (!weight) return;
-    const liveHeightCm = profile.height
+    const submitHeightCm = profile.height
       ? (profile.unit === "cm" ? parseFloat(profile.height) : parseFloat(profile.height)*2.54)
       : null;
-    const liveBF = liveHeightCm && waist && neck ? calcNavyBF(waist, neck, liveHeightCm) : null;
+    const submitBF = submitHeightCm && waist && neck ? calcNavyBF(waist, neck, submitHeightCm) : null;
 
     const entry = {
       date: today, weight: parseFloat(weight),
-      waist: waist || null, neck: neck || null, bodyFat: liveBF,
+      waist: waist || null, neck: neck || null, bodyFat: submitBF,
       calories: calories || null, protein: protein || null,
       carbs: carbs || null, fat: fat || null,
       photo: photoSrc || null, photoCaption: photoCaption || null,
