@@ -580,20 +580,6 @@ export default function App() {
       }}
     />
   </div>
-)}await saveLog(updated);
-showToast("Nutrition saved! 🔥", "🔥", "#fbbf24");        const updated = {
-          ...existing,
-          calories: data.calories,
-          protein: data.protein,
-          carbs: data.carbs,
-          fat: data.fat,
-          foodLog: data.foodLog,
-        };
-        await saveLog(updated);
-        showToast("Nutrition saved! 🔥", "🔥", "#fbbf24");
-      }}
-    />
-  </div>
 )}
         {/* PREDICT */}
         {tab === "predict" && (
