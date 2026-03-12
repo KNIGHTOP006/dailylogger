@@ -558,7 +558,6 @@ export default function App() {
           </div>
         )}
 
-{/* NUTRITION */}
 {tab === "nutrition" && (
   <div style={{ animation:"fadeUp .3s ease" }}>
     <NutritionLogger
@@ -566,9 +565,14 @@ export default function App() {
       accentColor="#f97316"
       onSave={async (data) => {
         const existing = logs.find(l => l.date === today);
-        const base = existing || { date: today, weight: null, waist: null, neck: null, bodyFat: null, photo: null };
         const updated = {
-          ...base,
+          date: today,
+          weight: existing?.weight ?? parseFloat(weight) ?? null,
+          waist: existing?.waist ?? waist ?? null,
+          neck: existing?.neck ?? neck ?? null,
+          bodyFat: existing?.bodyFat ?? null,
+          photo: existing?.photo ?? photoSrc ?? null,
+          photoCaption: existing?.photoCaption ?? photoCaption ?? null,
           calories: data.calories,
           protein: data.protein,
           carbs: data.carbs,
@@ -580,8 +584,7 @@ export default function App() {
       }}
     />
   </div>
-)}
-        {/* PREDICT */}
+)}        {/* PREDICT */}
         {tab === "predict" && (
           <div style={{ animation:"fadeUp .3s ease", display:"flex", flexDirection:"column", gap:12 }}>
             {!prediction ? (
