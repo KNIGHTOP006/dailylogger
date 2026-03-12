@@ -566,8 +566,22 @@ export default function App() {
       accentColor="#f97316"
       onSave={async (data) => {
         const existing = logs.find(l => l.date === today);
-        if (!existing) { showToast("Save your check-in first!", "⚠️", "#f87171"); return; }
+        const base = existing || { date: today, weight: null, waist: null, neck: null, bodyFat: null, photo: null };
         const updated = {
+          ...base,
+          calories: data.calories,
+          protein: data.protein,
+          carbs: data.carbs,
+          fat: data.fat,
+          foodLog: data.foodLog,
+        };
+        await saveLog(updated);
+        showToast("Nutrition saved! 🔥", "🔥", "#fbbf24");
+      }}
+    />
+  </div>
+)}await saveLog(updated);
+showToast("Nutrition saved! 🔥", "🔥", "#fbbf24");        const updated = {
           ...existing,
           calories: data.calories,
           protein: data.protein,
