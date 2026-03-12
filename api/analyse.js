@@ -13,37 +13,50 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           contents: [{
             parts: [{
-              text: `You are a nutrition expert. Analyse this food log and return ONLY a JSON object, no markdown, no explanation, no backticks.
+              text: `You are a nutrition expert. Analyse this food and return ONLY raw JSON with no markdown, no backticks, no explanation whatsoever. Just the JSON object starting with { and ending with }.
 
 Food: "${food}"
 
-Return this exact structure:
-{
-  "items": [
-    { "name": "food item", "calories": 123, "protein": 12, "carbs": 15, "fat": 5 }
-  ],
-  "totals": { "calories": 456, "protein": 30, "carbs": 45, "fat": 15 }
-}
+Required JSON structure:
+{"items":[{"name":"food name","calories":100,"protein":10,"carbs":15,"fat":5}],"totals":{"calories":100,"protein":10,"carbs":15,"fat":5}}
 
-Rules:
-- Break into individual food items
-- Use realistic average estimates for Indian and international foods
-- All values are numbers (no strings)
-- protein/carbs/fat in grams
-- If quantity not specified, assume 1 standard serving`
+Use realistic estimates. All values must be numbers not strings.`
             }]
           }],
-          generationConfig: { temperature: 0.1 }
+          generationConfig: {
+            temperature: 0.1,
+            responseMimeType: "application/json"
+          }
         })
       }
     );
 
     const data = await response.json();
-    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-    const clean = raw.replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(clean);
 
-    if (!parsed.items || !parsed.totals) throw new Error("Invalid response structure");
+    // Check for API errors
+    if (data.error) {
+      return res.status(500).json({ error: "Gemini API error", detail: JSON.stringify(data.error) });
+    }
+
+    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+
+    if (!raw) {
+      return res.status(500).json({ error: "Empty response from Gemini", detail: JSON.stringify(data) });
+    }
+
+    // Extract JSON from the response - find the first { to last }
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+    if (start === -1 || end === -1) {
+      return res.status(500).json({ error: "No JSON found in response", detail: raw });
+    }
+
+    const jsonStr = raw.slice(start, end + 1);
+    const parsed = JSON.parse(jsonStr);
+
+    if (!parsed.items || !parsed.totals) {
+      return res.status(500).json({ error: "Invalid structure", detail: jsonStr });
+    }
 
     res.status(200).json(parsed);
   } catch (e) {
