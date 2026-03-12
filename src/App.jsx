@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from "recharts";
+import NutritionLogger from "./NutritionLogger";
 import { db } from "./firebase";
 import { doc, getDoc, setDoc, collection, deleteDoc, onSnapshot } from "firebase/firestore";
 
@@ -558,37 +559,28 @@ export default function App() {
         )}
 
         {/* NUTRITION */}
-        {tab === "nutrition" && (
-          <div style={{ animation:"fadeUp .3s ease" }}>
-            <div style={{ background:card, border:`1px solid ${border}`, borderRadius:16, padding:18, backdropFilter:"blur(10px)" }}>
-              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6 }}>
-                <div style={{ fontFamily:"'Barlow Condensed'", fontWeight:800, fontSize:14, color:"#fbbf24", letterSpacing:1 }}>🔥 CALORIES</div>
-                <div style={{ fontSize:10, color:muted, background: isDark ? "rgba(251,191,36,.1)" : "rgba(251,191,36,.12)", padding:"3px 8px", borderRadius:99 }}>OPTIONAL</div>
-              </div>
-              <div style={{ fontSize:11, color:muted, marginBottom:14 }}>Track today's calories — saved alongside your check-in</div>
-              <div style={{ marginBottom:14 }}>
-                <label style={{ fontSize:10, color:muted, display:"block", marginBottom:5, textTransform:"uppercase", letterSpacing:.5 }}>Total Calories (kcal)</label>
-                <input type="number" placeholder="e.g. 1800" value={calories} onChange={e => setCalories(e.target.value)}
-                  style={{ ...inp, fontFamily:"'Barlow Condensed'", fontWeight:800, fontSize:32, borderColor:calories?"#fbbf24":border, textAlign:"center" }}/>
-              </div>
-              {calories && profile.calTarget && (
-                <div style={{ padding:"10px 14px", borderRadius:10, background: isDark ? "rgba(251,191,36,.08)" : "rgba(251,191,36,.07)", border:"1px solid rgba(251,191,36,.2)", fontSize:12, color:"#fbbf24", marginBottom:14 }}>
-                  {parseFloat(calories) <= parseFloat(profile.calTarget) ? "✅ Under target" : "⚠️ Over target"} — {Math.abs(parseFloat(calories) - parseFloat(profile.calTarget))} kcal {parseFloat(calories) <= parseFloat(profile.calTarget) ? "remaining" : "over"}
-                </div>
-              )}
-              <button onClick={handleSaveNutrition} style={{ width:"100%", padding:"13px", border:"none", borderRadius:12, background: calories ? "linear-gradient(135deg,#b45309,#fbbf24)" : isDark ? "rgba(255,255,255,.07)" : "rgba(0,0,0,.07)", color: calories ? "#000" : muted, fontFamily:"'Barlow Condensed'", fontWeight:800, fontSize:18, letterSpacing:2, cursor: calories ? "pointer" : "not-allowed", transition:"all .2s" }}>
-                SAVE NUTRITION
-              </button>
-              <div style={{ marginTop:6, fontSize:10, color:muted, textAlign:"center" }}>Requires check-in to be saved first</div>
-            </div>
-            <div style={{ background:card, border:`1px solid ${border}`, borderRadius:16, padding:18, marginTop:12, backdropFilter:"blur(10px)" }}>
-              <div style={{ fontFamily:"'Barlow Condensed'", fontWeight:800, fontSize:13, color:"#fbbf24", letterSpacing:1, marginBottom:10 }}>🎯 DAILY CALORIE TARGET</div>
-              <input type="number" placeholder="e.g. 2000" value={profile.calTarget||""} onChange={e => saveProfile({...profile, calTarget:e.target.value})} style={{ ...inp, fontFamily:"'Barlow Condensed'", fontWeight:800, fontSize:22 }}/>
-              <div style={{ marginTop:6, fontSize:11, color:muted }}>Set a target to track if you're over or under each day</div>
-            </div>
-          </div>
-        )}
-
+{tab === "nutrition" && (
+  <div style={{ animation:"fadeUp .3s ease" }}>
+    <NutritionLogger
+      isDark={isDark}
+      accentColor="#f97316"
+      onSave={async (data) => {
+        const existing = logs.find(l => l.date === today);
+        if (!existing) { showToast("Save your check-in first!", "⚠️", "#f87171"); return; }
+        const updated = {
+          ...existing,
+          calories: data.calories,
+          protein: data.protein,
+          carbs: data.carbs,
+          fat: data.fat,
+          foodLog: data.foodLog,
+        };
+        await saveLog(updated);
+        showToast("Nutrition saved! 🔥", "🔥", "#fbbf24");
+      }}
+    />
+  </div>
+)}
         {/* PREDICT */}
         {tab === "predict" && (
           <div style={{ animation:"fadeUp .3s ease", display:"flex", flexDirection:"column", gap:12 }}>
