@@ -5,57 +5,61 @@ export default async function handler(req, res) {
   if (!food) return res.status(400).json({ error: "No food provided" });
 
   try {
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{
-            parts: [{
-              text: `You are a nutrition expert. Analyse this food and return ONLY raw JSON with no markdown, no backticks, no explanation whatsoever. Just the JSON object starting with { and ending with }.
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${process.env.GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "llama-3.3-70b-versatile",
+        temperature: 0.1,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content: `You are a nutrition expert. Always respond with valid JSON only, no explanation.`
+          },
+          {
+            role: "user",
+            content: `Analyse this food and return nutrition data as JSON.
 
 Food: "${food}"
 
-Required JSON structure:
-{"items":[{"name":"food name","calories":100,"protein":10,"carbs":15,"fat":5}],"totals":{"calories":100,"protein":10,"carbs":15,"fat":5}}
+Return exactly this structure:
+{
+  "items": [
+    { "name": "food name", "calories": 100, "protein": 10, "carbs": 15, "fat": 5 }
+  ],
+  "totals": { "calories": 100, "protein": 10, "carbs": 15, "fat": 5 }
+}
 
-Use realistic estimates. All values must be numbers not strings.`
-            }]
-          }],
-          generationConfig: {
-            temperature: 0.1,
-            responseMimeType: "application/json"
+Rules:
+- Break into individual food items
+- Realistic estimates including Indian foods
+- All values are numbers
+- protein/carbs/fat in grams
+- Assume 1 standard serving if quantity not given`
           }
-        })
-      }
-    );
+        ]
+      })
+    });
 
     const data = await response.json();
 
-    // Check for API errors
     if (data.error) {
-      return res.status(500).json({ error: "Gemini API error", detail: JSON.stringify(data.error) });
+      return res.status(500).json({ error: "Groq API error", detail: JSON.stringify(data.error) });
     }
 
-    const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-
+    const raw = data.choices?.[0]?.message?.content || "";
     if (!raw) {
-      return res.status(500).json({ error: "Empty response from Gemini", detail: JSON.stringify(data) });
+      return res.status(500).json({ error: "Empty response", detail: JSON.stringify(data) });
     }
 
-    // Extract JSON from the response - find the first { to last }
-    const start = raw.indexOf("{");
-    const end = raw.lastIndexOf("}");
-    if (start === -1 || end === -1) {
-      return res.status(500).json({ error: "No JSON found in response", detail: raw });
-    }
-
-    const jsonStr = raw.slice(start, end + 1);
-    const parsed = JSON.parse(jsonStr);
+    const parsed = JSON.parse(raw);
 
     if (!parsed.items || !parsed.totals) {
-      return res.status(500).json({ error: "Invalid structure", detail: jsonStr });
+      return res.status(500).json({ error: "Invalid structure", detail: raw });
     }
 
     res.status(200).json(parsed);
