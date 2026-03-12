@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState } from "react";
 
 async function analyseFood(text) {
   const response = await fetch("/api/analyse", {
@@ -10,75 +10,46 @@ async function analyseFood(text) {
   return await response.json();
 }
 
-export default function NutritionLogger({ onSave, isDark = true, accentColor = "#f97316" }) {
-  const [mode,       setMode]       = useState("text");
-  const [input,      setInput]      = useState("");
-  const [loading,    setLoading]    = useState(false);
-  const [result,     setResult]     = useState(null);
-  const [error,      setError]      = useState(null);
-  const [recording,  setRecording]  = useState(false);
-  const [saved,      setSaved]      = useState(false);
-  const [voiceSupported, setVoiceSupported] = useState(false);
+const QUICK_ADDS = [
+  "2 boiled eggs",
+  "1 cup rice",
+  "1 banana",
+  "Chicken breast 150g",
+  "1 cup oats with milk",
+  "2 chapatis with dal",
+  "3 idlis with sambar",
+  "1 scoop whey protein",
+  "Black coffee",
+  "1 cup whole milk",
+];
 
-  const recognitionRef = useRef(null);
+export default function NutritionLogger({ onSave, isDark = true, accentColor = "#f97316" }) {
+  const [input,   setInput]   = useState("");
+  const [loading, setLoading] = useState(false);
+  const [result,  setResult]  = useState(null);
+  const [error,   setError]   = useState(null);
+  const [saved,   setSaved]   = useState(false);
 
   const text   = isDark ? "#f0f0ff" : "#12122a";
   const muted  = isDark ? "rgba(240,240,255,0.38)" : "rgba(0,0,0,0.38)";
   const card   = isDark ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.92)";
   const border = isDark ? "rgba(255,255,255,0.09)" : "rgba(0,0,0,0.08)";
-  const bg     = isDark ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.04)";
 
-  useEffect(() => {
-    try {
-      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (!SR) return;
-      const rec = new SR();
-      rec.continuous = true;
-      rec.interimResults = true;
-      rec.lang = "en-US";
-      rec.onresult = (e) => {
-        let final = "";
-        for (let i = 0; i < e.results.length; i++) {
-          if (e.results[i].isFinal) final += e.results[i][0].transcript + " ";
-        }
-        if (final) { setInput(final.trim()); setResult(null); setSaved(false); }
-      };
-      rec.onerror = () => { setRecording(false); setError("Microphone error. Please allow mic access and try again."); };
-      rec.onend = () => setRecording(false);
-      recognitionRef.current = rec;
-      setVoiceSupported(true);
-    } catch (e) {
-      setVoiceSupported(false);
-    }
-  }, []);
-
-  const toggleRecording = () => {
-    if (!recognitionRef.current) return;
-    if (recording) {
-      recognitionRef.current.stop();
-      setRecording(false);
-    } else {
-      setInput(""); setResult(null); setError(null); setSaved(false);
-      try {
-        recognitionRef.current.start();
-        setRecording(true);
-      } catch (e) {
-        setError("Could not start recording. Try refreshing the page.");
-      }
-    }
+  const appendQuick = (item) => {
+    setInput(prev => prev ? `${prev}, ${item}` : item);
+    setResult(null); setSaved(false);
   };
 
   const handleAnalyse = async () => {
     const query = input.trim();
     if (!query) return;
-    if (recording) { recognitionRef.current?.stop(); setRecording(false); }
     setLoading(true); setError(null); setResult(null); setSaved(false);
     try {
       const data = await analyseFood(query);
       if (!data.items || !data.totals) throw new Error("Bad response");
       setResult(data);
     } catch (e) {
-      setError("Couldn't analyse food. Try being specific — e.g. '2 boiled eggs, 1 cup rice, 1 banana'");
+      setError("Couldn't analyse food. Try being specific — e.g. '2 boiled eggs, 1 cup rice'");
     } finally {
       setLoading(false);
     }
@@ -97,105 +68,67 @@ export default function NutritionLogger({ onSave, isDark = true, accentColor = "
     setSaved(true);
   };
 
-  const reset = () => {
-    setInput(""); setResult(null); setError(null); setSaved(false);
-    if (recording) { recognitionRef.current?.stop(); setRecording(false); }
-  };
+  const reset = () => { setInput(""); setResult(null); setError(null); setSaved(false); };
 
   const macros = result ? [
-    { label:"Protein", val:result.totals.protein, color:"#60a5fa", calories: result.totals.protein * 4 },
-    { label:"Carbs",   val:result.totals.carbs,   color:"#fbbf24", calories: result.totals.carbs * 4 },
-    { label:"Fat",     val:result.totals.fat,      color:"#f87171", calories: result.totals.fat * 9 },
+    { label:"Protein", val:result.totals.protein, color:"#60a5fa", cal: result.totals.protein * 4 },
+    { label:"Carbs",   val:result.totals.carbs,   color:"#fbbf24", cal: result.totals.carbs * 4 },
+    { label:"Fat",     val:result.totals.fat,      color:"#f87171", cal: result.totals.fat * 9 },
   ] : [];
-  const macroTotal = macros.reduce((s, m) => s + m.calories, 0) || 1;
+  const macroTotal = macros.reduce((s,m) => s + m.cal, 0) || 1;
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
       <style>{`
         @keyframes fadeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
-        @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.8;transform:scale(1.05)}}
         @keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
         .food-item:not(:last-child){border-bottom:1px solid ${border}}
-        .nut-textarea:focus{outline:none;border-color:${accentColor} !important;box-shadow:0 0 0 3px ${accentColor}22}
+        .nut-ta:focus{outline:none;border-color:${accentColor} !important;box-shadow:0 0 0 3px ${accentColor}22}
+        .quick-chip:active{transform:scale(.95)}
       `}</style>
-
-      {/* MODE TOGGLE */}
-      <div style={{ display:"flex", background:bg, borderRadius:12, padding:4, gap:3 }}>
-        {[["text","✏️ Type food"],["voice","🎙️ Speak food"]].map(([m, label]) => (
-          <button key={m} onClick={() => { setMode(m); reset(); }} style={{
-            flex:1, padding:"10px 0", border:"none", borderRadius:9,
-            background: mode===m ? `linear-gradient(135deg,#c2410c,${accentColor})` : "transparent",
-            color: mode===m ? "#fff" : muted,
-            fontFamily:"'Barlow Condensed',sans-serif", fontWeight:800, fontSize:14,
-            letterSpacing:.5, cursor:"pointer", transition:"all .2s",
-          }}>{label}</button>
-        ))}
-      </div>
 
       {/* INPUT CARD */}
       <div style={{ background:card, border:`1px solid ${border}`, borderRadius:16, padding:18, backdropFilter:"blur(10px)" }}>
+        <div style={{ fontFamily:"'Barlow Condensed',sans-serif", fontWeight:800, fontSize:13, color:accentColor, letterSpacing:1, marginBottom:8 }}>
+          🍽️ WHAT DID YOU EAT TODAY?
+        </div>
 
-        {mode === "text" ? (
-          <>
-            <div style={{ fontFamily:"'Barlow Condensed',sans-serif", fontWeight:800, fontSize:13, color:accentColor, letterSpacing:1, marginBottom:8 }}>
-              🍽️ WHAT DID YOU EAT?
-            </div>
-            <textarea
-              className="nut-textarea"
-              value={input}
-              onChange={e => { setInput(e.target.value); setResult(null); setSaved(false); }}
-              placeholder={"e.g. 3 idlis with sambar, 1 cup black coffee, 2 boiled eggs\n\nBe specific — quantities and cooking method help!"}
-              style={{
-                width:"100%", minHeight:110, padding:"12px 14px",
-                background: isDark ? "rgba(255,255,255,.06)" : "rgba(0,0,0,.04)",
-                border:`1px solid ${border}`, borderRadius:10,
-                color:text, fontFamily:"'Barlow',sans-serif", fontSize:13, lineHeight:1.6,
-                resize:"vertical", boxSizing:"border-box", transition:"border-color .2s",
+        <textarea
+          className="nut-ta"
+          value={input}
+          onChange={e => { setInput(e.target.value); setResult(null); setSaved(false); }}
+          onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleAnalyse(); }}
+          placeholder={"e.g. 3 idlis with sambar, 2 boiled eggs, black coffee, banana\n\nList everything — quantities help accuracy!"}
+          style={{
+            width:"100%", minHeight:100, padding:"12px 14px",
+            background: isDark ? "rgba(255,255,255,.06)" : "rgba(0,0,0,.04)",
+            border:`1px solid ${border}`, borderRadius:10,
+            color:text, fontFamily:"'Barlow',sans-serif", fontSize:13, lineHeight:1.6,
+            resize:"vertical", boxSizing:"border-box", transition:"border-color .2s",
+          }}
+        />
+
+        {/* QUICK ADD CHIPS */}
+        <div style={{ marginTop:10, marginBottom:14 }}>
+          <div style={{ fontSize:10, color:muted, textTransform:"uppercase", letterSpacing:.5, marginBottom:7 }}>⚡ Quick add</div>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+            {QUICK_ADDS.map((item, i) => (
+              <button key={i} className="quick-chip" onClick={() => appendQuick(item)} style={{
+                padding:"5px 11px", border:`1px solid ${border}`, borderRadius:99,
+                background: isDark ? "rgba(255,255,255,.06)" : "rgba(0,0,0,.05)",
+                color:muted, fontSize:11, cursor:"pointer", transition:"all .15s",
+                fontFamily:"'Barlow',sans-serif",
               }}
-            />
-            <div style={{ fontSize:10, color:muted, marginTop:6 }}>
-              💡 Try: "masala oats 1 bowl", "chicken breast 150g grilled", "2 chapatis with dal"
-            </div>
-          </>
-        ) : (
-          <>
-            <div style={{ fontFamily:"'Barlow Condensed',sans-serif", fontWeight:800, fontSize:13, color:accentColor, letterSpacing:1, marginBottom:14 }}>
-              🎙️ SPEAK YOUR MEAL
-            </div>
-            <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:14, padding:"8px 0" }}>
-              <button onClick={toggleRecording} disabled={!voiceSupported} style={{
-                width:80, height:80, borderRadius:"50%", border:"none",
-                cursor: voiceSupported ? "pointer" : "not-allowed",
-                background: recording
-                  ? "linear-gradient(135deg,#dc2626,#f87171)"
-                  : voiceSupported
-                    ? `linear-gradient(135deg,#c2410c,${accentColor})`
-                    : "rgba(255,255,255,.1)",
-                boxShadow: recording
-                  ? "0 0 0 12px rgba(248,113,113,.15), 0 0 0 24px rgba(248,113,113,.06)"
-                  : voiceSupported ? `0 0 0 8px ${accentColor}18` : "none",
-                transition:"all .3s", fontSize:32,
-                animation: recording ? "pulse 1.5s ease infinite" : "none",
-              }}>
-                {recording ? "⏹️" : "🎤"}
+              onMouseEnter={e => { e.currentTarget.style.borderColor = accentColor; e.currentTarget.style.color = accentColor; }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = border; e.currentTarget.style.color = muted; }}>
+                {item}
               </button>
-              <div style={{ fontSize:12, color: recording ? "#f87171" : muted, fontWeight: recording ? 700 : 400, fontFamily:"'Barlow Condensed',sans-serif", letterSpacing:.5, textAlign:"center" }}>
-                {!voiceSupported ? "Voice not supported — use Chrome/Edge" : recording ? "● RECORDING — TAP TO STOP" : "TAP MIC TO START"}
-              </div>
-            </div>
-            {input && (
-              <div style={{ marginTop:12, padding:"12px 14px", background: isDark ? "rgba(255,255,255,.05)" : "rgba(0,0,0,.04)", border:`1px solid ${border}`, borderRadius:10 }}>
-                <div style={{ fontSize:10, color:muted, textTransform:"uppercase", letterSpacing:.5, marginBottom:5 }}>Heard:</div>
-                <div style={{ fontSize:13, color:text, lineHeight:1.6, fontStyle:"italic" }}>"{input}"</div>
-                <button onClick={reset} style={{ marginTop:8, fontSize:10, color:"#f87171", background:"none", border:"none", cursor:"pointer", padding:0 }}>✕ Clear & retry</button>
-              </div>
-            )}
-          </>
-        )}
+            ))}
+          </div>
+        </div>
 
-        {/* ANALYSE BUTTON */}
         <button onClick={handleAnalyse} disabled={!input.trim() || loading} style={{
-          width:"100%", marginTop:14, padding:"13px", border:"none", borderRadius:12,
+          width:"100%", padding:"13px", border:"none", borderRadius:12,
           background: input.trim() && !loading ? `linear-gradient(135deg,#c2410c,${accentColor})` : isDark ? "rgba(255,255,255,.07)" : "rgba(0,0,0,.07)",
           color: input.trim() && !loading ? "#fff" : muted,
           fontFamily:"'Barlow Condensed',sans-serif", fontWeight:800, fontSize:18, letterSpacing:2,
@@ -207,13 +140,13 @@ export default function NutritionLogger({ onSave, isDark = true, accentColor = "
             ? <><span style={{ fontSize:18, animation:"spin 1s linear infinite", display:"inline-block" }}>⚡</span> ANALYSING...</>
             : "🔍 ANALYSE CALORIES"}
         </button>
+        <div style={{ marginTop:6, fontSize:10, color:muted, textAlign:"center" }}>Ctrl+Enter to analyse</div>
       </div>
 
       {/* ERROR */}
       {error && (
         <div style={{ padding:"12px 16px", background:"rgba(248,113,113,.08)", border:"1px solid rgba(248,113,113,.25)", borderRadius:12, fontSize:12, color:"#f87171", display:"flex", gap:10, alignItems:"flex-start" }}>
-          <span style={{ fontSize:18, flexShrink:0 }}>⚠️</span>
-          <span>{error}</span>
+          <span style={{ fontSize:18, flexShrink:0 }}>⚠️</span><span>{error}</span>
         </div>
       )}
 
@@ -221,7 +154,7 @@ export default function NutritionLogger({ onSave, isDark = true, accentColor = "
       {result && (
         <div style={{ animation:"fadeUp .35s ease", display:"flex", flexDirection:"column", gap:10 }}>
 
-          {/* Summary */}
+          {/* Totals */}
           <div style={{ background:card, border:`1px solid ${accentColor}33`, borderRadius:16, padding:18, backdropFilter:"blur(10px)" }}>
             <div style={{ fontFamily:"'Barlow Condensed',sans-serif", fontWeight:800, fontSize:13, color:accentColor, letterSpacing:1, marginBottom:12 }}>📊 NUTRITION SUMMARY</div>
             <div style={{ textAlign:"center", marginBottom:16 }}>
@@ -229,9 +162,9 @@ export default function NutritionLogger({ onSave, isDark = true, accentColor = "
               <div style={{ fontFamily:"'Barlow Condensed',sans-serif", fontWeight:800, fontSize:56, color:accentColor, lineHeight:1 }}>{result.totals.calories}</div>
               <div style={{ fontSize:11, color:muted }}>kcal</div>
             </div>
-            <div style={{ height:10, borderRadius:99, overflow:"hidden", display:"flex", gap:2, marginBottom:10 }}>
+            <div style={{ height:10, borderRadius:99, overflow:"hidden", display:"flex", gap:2, marginBottom:12 }}>
               {macros.map((m,i) => (
-                <div key={i} style={{ flex: m.calories / macroTotal, background:m.color, borderRadius:99, minWidth:4 }}/>
+                <div key={i} style={{ flex: m.cal / macroTotal, background:m.color, borderRadius:99, minWidth:4 }}/>
               ))}
             </div>
             <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:8 }}>
@@ -270,7 +203,9 @@ export default function NutritionLogger({ onSave, isDark = true, accentColor = "
           {/* Save / Reset */}
           <div style={{ display:"flex", gap:8 }}>
             <button onClick={handleSave} disabled={saved} style={{
-              flex:1, padding:"13px", border: saved ? "1px solid rgba(52,211,153,.3)" : "none", borderRadius:12,
+              flex:1, padding:"13px",
+              border: saved ? "1px solid rgba(52,211,153,.3)" : "none",
+              borderRadius:12,
               background: saved ? "rgba(52,211,153,.15)" : "linear-gradient(135deg,#059669,#34d399)",
               color: saved ? "#34d399" : "#000",
               fontFamily:"'Barlow Condensed',sans-serif", fontWeight:800, fontSize:17, letterSpacing:1.5,
@@ -284,11 +219,7 @@ export default function NutritionLogger({ onSave, isDark = true, accentColor = "
             }}>↩ Reset</button>
           </div>
 
-          {saved && (
-            <div style={{ textAlign:"center", fontSize:11, color:"#34d399" }}>
-              Calories & macros saved to today's log ✓
-            </div>
-          )}
+          {saved && <div style={{ textAlign:"center", fontSize:11, color:"#34d399" }}>Calories & macros saved to today's log ✓</div>}
         </div>
       )}
     </div>
