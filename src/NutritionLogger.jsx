@@ -91,21 +91,16 @@ export default function NutritionLogger({ onSave, isDark = true, accentColor = "
   };
 
   // ── ANALYSE ─────────────────────────────────────────────────────────────
-  const handleAnalyse = async () => {
-    const query = input.trim();
-    if (!query) return;
-    if (recording) { recognitionRef.current?.stop(); setRecording(false); }
-    setLoading(true); setError(null); setResult(null); setSaved(false);
-    try {
-      const data = await analyseFood(query);
-      setResult(data);
-    } catch (e) {
-      setError("Couldn't parse food. Try being more specific, e.g. '2 boiled eggs, 1 cup rice'");
-    } finally {
-      setLoading(false);
-    }
-  };
-
+async function analyseFood(text) {
+  const response = await fetch("/api/analyse", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ food: text }),
+  });
+  if (!response.ok) throw new Error("API error");
+  return await response.json();
+}
+    
   const handleSave = () => {
     if (!result) return;
     onSave?.({
