@@ -558,7 +558,7 @@ export default function App() {
           </div>
         )}
 
-        {/* NUTRITION */}
+{/* NUTRITION */}
 {tab === "nutrition" && (
   <div style={{ animation:"fadeUp .3s ease" }}>
     <NutritionLogger
