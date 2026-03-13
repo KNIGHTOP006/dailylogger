@@ -571,10 +571,20 @@ export default function App() {
                 </div>
               )}
             </div>
+<button onClick={async () => {
+  try {
+    await setDoc(doc(db, "users", "harshith", "logs", "test-123"), { test: true, time: new Date().toISOString() });
+    alert("✅ Firestore write SUCCESS!");
+  } catch(e) {
+    alert("❌ Firestore write FAILED: " + e.message);
+  }
+}} style={{ width:"100%", padding:"12px", marginBottom:8, background:"#a78bfa", border:"none", borderRadius:12, color:"#fff", fontWeight:700, fontSize:16, cursor:"pointer" }}>
+  🧪 TEST FIRESTORE
+</button>
 
-            <button onClick={handleSubmit} disabled={!weight} style={{ width:"100%", padding:"15px", border:"none", borderRadius:14, background: weight ? "linear-gradient(135deg,#c2410c,#f97316)" : isDark ? "rgba(255,255,255,.07)" : "rgba(0,0,0,.07)", color: weight ? "#fff" : muted, fontFamily:"'Barlow Condensed'", fontWeight:800, fontSize:22, letterSpacing:3, cursor: weight ? "pointer" : "not-allowed", transition:"all .2s", boxShadow: weight ? "0 6px 24px rgba(249,115,22,.35)" : "none" }}>
-              {submitted ? "✓ UPDATE CHECK-IN" : "SAVE CHECK-IN"}
-            </button>
+<button onClick={handleSubmit} disabled={!weight} style={{ width:"100%", padding:"15px", border:"none", borderRadius:14, background: weight ? "linear-gradient(135deg,#c2410c,#f97316)" : isDark ? "rgba(255,255,255,.07)" : "rgba(0,0,0,.07)", color: weight ? "#fff" : muted, fontFamily:"'Barlow Condensed'", fontWeight:800, fontSize:22, letterSpacing:3, cursor: weight ? "pointer" : "not-allowed", transition:"all .2s", boxShadow: weight ? "0 6px 24px rgba(249,115,22,.35)" : "none" }}>
+  {submitted ? "✓ UPDATE CHECK-IN" : "SAVE CHECK-IN"}
+</button>
             {!weight && (
               <div style={{ marginTop:8, textAlign:"center", fontSize:11, color:muted }}>⚖️ Enter your weight to save</div>
             )}
