@@ -263,17 +263,11 @@ export default function App() {
   }, [logs]);
 
   // ── saveLog: uploads photo to Firebase Storage, stores URL in Firestore ──
-  const saveLog = async (entry) => {
+const saveLog = async (entry) => {
     setSyncing(true);
     try {
-      let photoURL = entry.photo;
-      // Only upload if it's a fresh base64 image
-      if (entry.photo && entry.photo.startsWith("data:")) {
-        const photoRef = ref(storage, `photos/${USER_ID}/${entry.date}.jpg`);
-        await uploadString(photoRef, entry.photo, "data_url");
-        photoURL = await getDownloadURL(photoRef);
-      }
-      const firestoreEntry = { ...entry, photo: photoURL || null };
+      // Strip photo for now — save everything else to Firestore
+      const firestoreEntry = { ...entry, photo: null };
       await setDoc(doc(db, "users", USER_ID, "logs", entry.date), firestoreEntry);
     } catch (e) {
       console.error("Save failed:", e);
@@ -281,7 +275,6 @@ export default function App() {
     }
     setSyncing(false);
   };
-
   const deleteLog = async (date) => {
     setSyncing(true);
     try {
