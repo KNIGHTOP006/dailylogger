@@ -335,13 +335,26 @@ const handleSubmit = async () => {
     showToast("Check-in saved! 💪", "✅", "#34d399");
   };
 
-  const handlePhoto = (e) => {
+const handlePhoto = (e) => {
     const file = e.target.files[0]; if (!file) return;
     const reader = new FileReader();
-    reader.onload = ev => setPhotoSrc(ev.target.result);
+    reader.onload = ev => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        const MAX = 600;
+        const ratio = Math.min(MAX / img.width, MAX / img.height);
+        canvas.width = img.width * ratio;
+        canvas.height = img.height * ratio;
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        const compressed = canvas.toDataURL("image/jpeg", 0.6);
+        setPhotoSrc(compressed);
+      };
+      img.src = ev.target.result;
+    };
     reader.readAsDataURL(file);
   };
-
+  
   const exportCSV = () => {
     const rows = [
       ["Date","Weight(kg)","Waist(cm)","Neck(cm)","BodyFat%","Calories"],
