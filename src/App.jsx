@@ -252,15 +252,21 @@ const unsubLogs = onSnapshot(
     return () => unsubLogs();
   }, [unlocked]);
 
-  useEffect(() => {
+useEffect(() => {
     const ex = logs.find(l => l.date === today);
     if (ex) {
-      setWeight(ex.weight || ""); setWaist(ex.waist || ""); setNeck(ex.neck || "");
-      setCalories(ex.calories || ""); setPhotoSrc(ex.photo || null);
-      setPhotoCaption(ex.photoCaption || ""); setSubmitted(true);
+      setWeight(ex.weight || "");
+      setWaist(ex.waist || "");
+      setNeck(ex.neck || "");
+      setCalories(ex.calories || "");
+      setPhotoSrc(ex.photo || null);
+      setPhotoCaption(ex.photoCaption || "");
+      setSubmitted(true);
+    } else {
+      setSubmitted(false);
     }
   }, [logs]);
-
+  
 const saveLog = async (entry) => {
   setSyncing(true);
   // Store photo separately in localStorage (too large for Firestore)
