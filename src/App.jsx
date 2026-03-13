@@ -300,7 +300,7 @@ const deleteLog = async (date) => {
     reader.readAsDataURL(file);
   };
 
-  const handleSubmit = async () => {
+const handleSubmit = async () => {
     if (!weight) return;
     const hCm = profile.height ? (profile.unit === "cm" ? parseFloat(profile.height) : parseFloat(profile.height)*2.54) : null;
     const bf   = hCm && waist && neck ? calcNavyBF(waist, neck, hCm) : null;
@@ -310,23 +310,17 @@ const deleteLog = async (date) => {
       calories: calories || null,
       photo: photoSrc || null, photoCaption: photoCaption || null,
     };
-const saveLog = async (entry) => {
-  setSyncing(true);
-  try {
-    if (entry.photo && entry.photo !== "saved") {
-      localStorage.setItem(`photo_${entry.date}`, entry.photo);
+    await saveLog(entry);
+    const newLogs = [...logs.filter(l => l.date !== today), entry].sort((a,b) => new Date(b.date)-new Date(a.date));
+    const ne = checkMilestones(newLogs, earned);
+    if (ne.length > earned.length) {
+      const badge = MILESTONES.find(m => !earned.includes(m.id) && ne.includes(m.id));
+      if (badge) { setNewBadge(badge); setTimeout(() => setNewBadge(null), 3500); }
+      await saveEarned(ne);
     }
-    const firestoreEntry = { ...entry, photo: entry.photo ? "saved" : null };
-    await setDoc(doc(db, "users", USER_ID, "logs", entry.date), firestoreEntry);
-    console.log("✅ Saved to Firestore:", firestoreEntry);
-  } catch (e) {
-    console.error("❌ Firestore save failed:", e);
-  }
-  setSyncing(false);
-};    setSubmitted(true);
+    setSubmitted(true);
     showToast("Check-in saved! 💪", "✅", "#34d399");
   };
-
   const handleSaveNutrition = async () => {
     const existing = logs.find(l => l.date === today);
     if (!existing) { showToast("Save your check-in first!", "⚠️", "#f87171"); return; }
