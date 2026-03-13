@@ -230,15 +230,22 @@ export default function App() {
 
   useEffect(() => {
     if (!unlocked) { setLoading(false); return; }
-    const unsubLogs = onSnapshot(
-      collection(db, "users", USER_ID, "logs"),
-      (snap) => {
-        const data = snap.docs.map(d => ({ ...d.data(), id: d.id }));
-        setLogs(data.sort((a,b) => new Date(b.date)-new Date(a.date)));
-        setLoading(false);
-      },
-      () => setLoading(false)
-    );
+const unsubLogs = onSnapshot(
+  collection(db, "users", USER_ID, "logs"),
+  (snap) => {
+    const data = snap.docs.map(d => {
+      const entry = { ...d.data(), id: d.id };
+      // Reattach photo from localStorage
+      if (entry.photo === "saved") {
+        entry.photo = localStorage.getItem(`photo_${entry.date}`) || null;
+      }
+      return entry;
+    });
+    setLogs(data.sort((a,b) => new Date(b.date)-new Date(a.date)));
+    setLoading(false);
+  },
+  () => setLoading(false)
+);
     getDoc(doc(db, "users", USER_ID, "meta", "profile")).then(d => { if (d.exists()) setProfile(d.data()); });
     getDoc(doc(db, "users", USER_ID, "meta", "earned")).then(d => { if (d.exists()) setEarned(d.data().list || []); });
     getDoc(doc(db, "users", USER_ID, "meta", "theme")).then(d => { if (d.exists()) setTheme(d.data().value || "dark"); });
@@ -254,18 +261,23 @@ export default function App() {
     }
   }, [logs]);
 
-  const saveLog = async (entry) => {
-    setSyncing(true);
-    await setDoc(doc(db, "users", USER_ID, "logs", entry.date), entry);
-    setSyncing(false);
-  };
+const saveLog = async (entry) => {
+  setSyncing(true);
+  // Store photo separately in localStorage (too large for Firestore)
+  if (entry.photo) {
+    localStorage.setItem(`photo_${entry.date}`, entry.photo);
+  }
+  const firestoreEntry = { ...entry, photo: entry.photo ? "saved" : null };
+  await setDoc(doc(db, "users", USER_ID, "logs", entry.date), firestoreEntry);
+  setSyncing(false);
+};
 
-  const deleteLog = async (date) => {
-    setSyncing(true);
-    await deleteDoc(doc(db, "users", USER_ID, "logs", date));
-    setSyncing(false);
-  };
-
+const deleteLog = async (date) => {
+  setSyncing(true);
+  localStorage.removeItem(`photo_${date}`);
+  await deleteDoc(doc(db, "users", USER_ID, "logs", date));
+  setSyncing(false);
+};
   const saveProfile = async (p) => {
     setProfile(p);
     await setDoc(doc(db, "users", USER_ID, "meta", "profile"), p);
