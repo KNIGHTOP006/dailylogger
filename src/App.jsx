@@ -199,7 +199,7 @@ function PinScreen({ onUnlock }) {
   );
 }
 
-export default function App() {
+export default function App() {}
   const today = new Date().toISOString().split("T")[0];
   const quoteIdx = useRef(Math.floor(Math.random() * QUOTES.length)).current;
 
@@ -233,14 +233,7 @@ export default function App() {
     const unsubLogs = onSnapshot(
       collection(db, "users", USER_ID, "logs"),
       (snap) => {
-        const data = snap.docs.map(d => {
-          const entry = { ...d.data(), id: d.id };
-          if (entry.photo === "saved") {
-            entry.photo = localStorage.getItem(`photo_${entry.date}`) || null;
-          }
-          return entry;
-        });
-        setLogs(data.sort((a,b) => new Date(b.date)-new Date(a.date)));
+const data = snap.docs.map(d => ({ ...d.data(), id: d.id }));        setLogs(data.sort((a,b) => new Date(b.date)-new Date(a.date)));
         setLoading(false);
       },
       () => setLoading(false)
@@ -323,16 +316,24 @@ const handleSubmit = async () => {
       photo: photoSrc || null,
       photoCaption: photoCaption || null,
     };
-    await saveLog(entry);
-    const newLogs = [...logs.filter(l => l.date !== today), entry].sort((a,b) => new Date(b.date)-new Date(a.date));
-    const ne = checkMilestones(newLogs, earned);
-    if (ne.length > earned.length) {
-      const badge = MILESTONES.find(m => !earned.includes(m.id) && ne.includes(m.id));
-      if (badge) { setNewBadge(badge); setTimeout(() => setNewBadge(null), 3500); }
-      await saveEarned(ne);
+
+const saveLog = async (entry) => {
+    setSyncing(true);
+    try {
+      let photoURL = entry.photo;
+      // If it's a fresh base64 photo, upload to Firebase Storage
+      if (entry.photo && entry.photo.startsWith("data:")) {
+        const photoRef = ref(storage, `photos/${USER_ID}/${entry.date}.jpg`);
+        await uploadString(photoRef, entry.photo, "data_url");
+        photoURL = await getDownloadURL(photoRef);
+      }
+      const firestoreEntry = { ...entry, photo: photoURL || null };
+      await setDoc(doc(db, "users", USER_ID, "logs", entry.date), firestoreEntry);
+    } catch (e) {
+      console.error("Firestore save failed:", e);
+      showToast("Save failed! " + e.message, "❌", "#f87171");
     }
-    setSubmitted(true);
-    showToast("Check-in saved! 💪", "✅", "#34d399");
+    setSyncing(false);
   };
 
 const handlePhoto = (e) => {
@@ -342,19 +343,18 @@ const handlePhoto = (e) => {
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement("canvas");
-        const MAX = 600;
+        const MAX = 800;
         const ratio = Math.min(MAX / img.width, MAX / img.height);
         canvas.width = img.width * ratio;
         canvas.height = img.height * ratio;
         canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-        const compressed = canvas.toDataURL("image/jpeg", 0.6);
-        setPhotoSrc(compressed);
+        setPhotoSrc(canvas.toDataURL("image/jpeg", 0.7));
       };
       img.src = ev.target.result;
     };
     reader.readAsDataURL(file);
   };
-  
+
   const exportCSV = () => {
     const rows = [
       ["Date","Weight(kg)","Waist(cm)","Neck(cm)","BodyFat%","Calories"],
