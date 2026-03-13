@@ -199,7 +199,7 @@ function PinScreen({ onUnlock }) {
   );
 }
 
-export default function App() {}
+export default function App() {
   const today = new Date().toISOString().split("T")[0];
   const quoteIdx = useRef(Math.floor(Math.random() * QUOTES.length)).current;
 
@@ -303,7 +303,8 @@ const handleSubmit = async () => {
     alert("calling saveLog now...");
 
     if (!weight) return;
-    console.log("weight passed, calling saveLog...");    const hCm = profile.height
+    console.log("weight passed, calling saveLog...");
+    const hCm = profile.height
       ? (profile.unit === "cm" ? parseFloat(profile.height) : parseFloat(profile.height) * 2.54)
       : null;
     const bf = hCm && waist && neck ? calcNavyBF(waist, neck, hCm) : null;
@@ -316,25 +317,8 @@ const handleSubmit = async () => {
       photo: photoSrc || null,
       photoCaption: photoCaption || null,
     };
-
-const saveLog = async (entry) => {
-    setSyncing(true);
-    try {
-      let photoURL = entry.photo;
-      // If it's a fresh base64 photo, upload to Firebase Storage
-      if (entry.photo && entry.photo.startsWith("data:")) {
-        const photoRef = ref(storage, `photos/${USER_ID}/${entry.date}.jpg`);
-        await uploadString(photoRef, entry.photo, "data_url");
-        photoURL = await getDownloadURL(photoRef);
-      }
-      const firestoreEntry = { ...entry, photo: photoURL || null };
-      await setDoc(doc(db, "users", USER_ID, "logs", entry.date), firestoreEntry);
-    } catch (e) {
-      console.error("Firestore save failed:", e);
-      showToast("Save failed! " + e.message, "❌", "#f87171");
-    }
-    setSyncing(false);
-  };
+    await saveLog(entry);
+};
 
 const handlePhoto = (e) => {
     const file = e.target.files[0]; if (!file) return;
