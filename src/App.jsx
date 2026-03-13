@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from "react";
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from "recharts";
 import NutritionLogger from "./NutritionLogger";
-import { db } from "./firebase";
+import { db, storage } from "./firebase";
 import { doc, getDoc, setDoc, collection, deleteDoc, onSnapshot } from "firebase/firestore";
+import { ref, uploadString, getDownloadURL, deleteObject } from "firebase/storage";
 
 const CORRECT_PIN = "1234";
 const USER_ID     = "harshith";
@@ -233,7 +234,8 @@ export default function App() {
     const unsubLogs = onSnapshot(
       collection(db, "users", USER_ID, "logs"),
       (snap) => {
-const data = snap.docs.map(d => ({ ...d.data(), id: d.id }));        setLogs(data.sort((a,b) => new Date(b.date)-new Date(a.date)));
+        const data = snap.docs.map(d => ({ ...d.data(), id: d.id }));
+        setLogs(data.sort((a,b) => new Date(b.date)-new Date(a.date)));
         setLoading(false);
       },
       () => setLoading(false)
@@ -260,25 +262,32 @@ const data = snap.docs.map(d => ({ ...d.data(), id: d.id }));        setLogs(dat
     }
   }, [logs]);
 
-  // ── SINGLE saveLog — no duplicates ───────────────────────────────
+  // ── saveLog: uploads photo to Firebase Storage, stores URL in Firestore ──
   const saveLog = async (entry) => {
     setSyncing(true);
     try {
-      if (entry.photo && entry.photo !== "saved") {
-        localStorage.setItem(`photo_${entry.date}`, entry.photo);
+      let photoURL = entry.photo;
+      // Only upload if it's a fresh base64 image
+      if (entry.photo && entry.photo.startsWith("data:")) {
+        const photoRef = ref(storage, `photos/${USER_ID}/${entry.date}.jpg`);
+        await uploadString(photoRef, entry.photo, "data_url");
+        photoURL = await getDownloadURL(photoRef);
       }
-      const firestoreEntry = { ...entry, photo: entry.photo ? "saved" : null };
+      const firestoreEntry = { ...entry, photo: photoURL || null };
       await setDoc(doc(db, "users", USER_ID, "logs", entry.date), firestoreEntry);
     } catch (e) {
-      console.error("Firestore save failed:", e);
-      showToast("Save failed! Check console.", "❌", "#f87171");
+      console.error("Save failed:", e);
+      showToast("Save failed! " + e.message, "❌", "#f87171");
     }
     setSyncing(false);
   };
 
   const deleteLog = async (date) => {
     setSyncing(true);
-    localStorage.removeItem(`photo_${date}`);
+    try {
+      const photoRef = ref(storage, `photos/${USER_ID}/${date}.jpg`);
+      await deleteObject(photoRef).catch(() => {}); // ignore if no photo
+    } catch(e) {}
     await deleteDoc(doc(db, "users", USER_ID, "logs", date));
     setSyncing(false);
   };
@@ -297,13 +306,9 @@ const data = snap.docs.map(d => ({ ...d.data(), id: d.id }));        setLogs(dat
     setTheme(t);
     await setDoc(doc(db, "users", USER_ID, "meta", "theme"), { value: t });
   };
-const handleSubmit = async () => {
-    alert("handleSubmit fired, weight: " + weight);
-    if (!weight) return;
-    alert("calling saveLog now...");
 
+  const handleSubmit = async () => {
     if (!weight) return;
-    console.log("weight passed, calling saveLog...");
     const hCm = profile.height
       ? (profile.unit === "cm" ? parseFloat(profile.height) : parseFloat(profile.height) * 2.54)
       : null;
@@ -318,9 +323,18 @@ const handleSubmit = async () => {
       photoCaption: photoCaption || null,
     };
     await saveLog(entry);
-};
+    const newLogs = [...logs.filter(l => l.date !== today), entry].sort((a,b) => new Date(b.date)-new Date(a.date));
+    const ne = checkMilestones(newLogs, earned);
+    if (ne.length > earned.length) {
+      const badge = MILESTONES.find(m => !earned.includes(m.id) && ne.includes(m.id));
+      if (badge) { setNewBadge(badge); setTimeout(() => setNewBadge(null), 3500); }
+      await saveEarned(ne);
+    }
+    setSubmitted(true);
+    showToast("Check-in saved! 💪", "✅", "#34d399");
+  };
 
-const handlePhoto = (e) => {
+  const handlePhoto = (e) => {
     const file = e.target.files[0]; if (!file) return;
     const reader = new FileReader();
     reader.onload = ev => {
@@ -434,7 +448,6 @@ const handlePhoto = (e) => {
         </div>
       )}
 
-      {/* HEADER */}
       <div style={{ background: isDark ? "rgba(8,8,16,.9)" : "rgba(255,255,255,.88)", borderBottom:`1px solid ${border}`, backdropFilter:"blur(20px)", position:"sticky", top:0, zIndex:10 }}>
         <div style={{ maxWidth:520, margin:"0 auto", padding:"13px 16px 11px" }}>
           <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
@@ -477,14 +490,12 @@ const handlePhoto = (e) => {
           </div>
         )}
 
-        {/* TAB ICONS */}
         <div style={{ display:"flex", gap:3, background: isDark ? "rgba(255,255,255,.04)" : "rgba(0,0,0,.04)", borderRadius:14, padding:4, marginBottom:15 }}>
           {TABS.map(t => (
             <button key={t.id} className="tab-btn" onClick={() => setTab(t.id)} style={{ flex:1, padding:"9px 2px", border:"none", borderRadius:10, background: tab===t.id ? "linear-gradient(135deg,#c2410c,#f97316)" : "transparent", color: tab===t.id ? "#fff" : muted, fontSize:18, cursor:"pointer", transition:"all .2s" }} title={t.label}>{t.icon}</button>
           ))}
         </div>
 
-        {/* CHECK-IN */}
         {tab === "checkin" && (
           <div style={{ animation:"fadeUp .3s ease" }}>
             {todayComplete && (
@@ -571,27 +582,14 @@ const handlePhoto = (e) => {
                 </div>
               )}
             </div>
-<button onClick={async () => {
-  try {
-    await setDoc(doc(db, "users", "harshith", "logs", "test-123"), { test: true, time: new Date().toISOString() });
-    alert("✅ Firestore write SUCCESS!");
-  } catch(e) {
-    alert("❌ Firestore write FAILED: " + e.message);
-  }
-}} style={{ width:"100%", padding:"12px", marginBottom:8, background:"#a78bfa", border:"none", borderRadius:12, color:"#fff", fontWeight:700, fontSize:16, cursor:"pointer" }}>
-  🧪 TEST FIRESTORE
-</button>
 
-<button onClick={handleSubmit} disabled={!weight} style={{ width:"100%", padding:"15px", border:"none", borderRadius:14, background: weight ? "linear-gradient(135deg,#c2410c,#f97316)" : isDark ? "rgba(255,255,255,.07)" : "rgba(0,0,0,.07)", color: weight ? "#fff" : muted, fontFamily:"'Barlow Condensed'", fontWeight:800, fontSize:22, letterSpacing:3, cursor: weight ? "pointer" : "not-allowed", transition:"all .2s", boxShadow: weight ? "0 6px 24px rgba(249,115,22,.35)" : "none" }}>
-  {submitted ? "✓ UPDATE CHECK-IN" : "SAVE CHECK-IN"}
-</button>
-            {!weight && (
-              <div style={{ marginTop:8, textAlign:"center", fontSize:11, color:muted }}>⚖️ Enter your weight to save</div>
-            )}
+            <button onClick={handleSubmit} disabled={!weight} style={{ width:"100%", padding:"15px", border:"none", borderRadius:14, background: weight ? "linear-gradient(135deg,#c2410c,#f97316)" : isDark ? "rgba(255,255,255,.07)" : "rgba(0,0,0,.07)", color: weight ? "#fff" : muted, fontFamily:"'Barlow Condensed'", fontWeight:800, fontSize:22, letterSpacing:3, cursor: weight ? "pointer" : "not-allowed", transition:"all .2s", boxShadow: weight ? "0 6px 24px rgba(249,115,22,.35)" : "none" }}>
+              {submitted ? "✓ UPDATE CHECK-IN" : "SAVE CHECK-IN"}
+            </button>
+            {!weight && <div style={{ marginTop:8, textAlign:"center", fontSize:11, color:muted }}>⚖️ Enter your weight to save</div>}
           </div>
         )}
 
-        {/* NUTRITION */}
         {tab === "nutrition" && (
           <div style={{ animation:"fadeUp .3s ease" }}>
             <NutritionLogger
@@ -620,7 +618,6 @@ const handlePhoto = (e) => {
           </div>
         )}
 
-        {/* PREDICT */}
         {tab === "predict" && (
           <div style={{ animation:"fadeUp .3s ease", display:"flex", flexDirection:"column", gap:12 }}>
             {!prediction ? (
@@ -639,10 +636,10 @@ const handlePhoto = (e) => {
                 <>
                   <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
                     {[
-                      { label:"Your TDEE",     val:`${tdee}`,                                sub:"kcal/day",              icon:"⚡", col:"#60a5fa" },
-                      { label:"Avg Intake",    val:`${avgCal}`,                             sub:"kcal/day",              icon:"🍽️", col:"#fbbf24" },
+                      { label:"Your TDEE", val:`${tdee}`, sub:"kcal/day", icon:"⚡", col:"#60a5fa" },
+                      { label:"Avg Intake", val:`${avgCal}`, sub:"kcal/day", icon:"🍽️", col:"#fbbf24" },
                       { label:"Daily Deficit", val:`${Math.abs(Math.round(dailyDeficit))}`, sub:isDeficit?"deficit":"surplus", icon:isDeficit?"📉":"📈", col:isDeficit?"#34d399":"#f87171" },
-                      { label:"Weekly Loss",   val:weeklyFatLossKg>0?`${weeklyFatLossKg.toFixed(2)}`:"0", sub:"kg/week", icon:"🔥", col:isDeficit?"#34d399":"#f87171" },
+                      { label:"Weekly Loss", val:weeklyFatLossKg>0?`${weeklyFatLossKg.toFixed(2)}`:"0", sub:"kg/week", icon:"🔥", col:isDeficit?"#34d399":"#f87171" },
                     ].map((s,i) => (
                       <div key={i} style={{ background:card, border:`1px solid ${s.col}28`, borderRadius:12, padding:"13px 14px", backdropFilter:"blur(10px)" }}>
                         <div style={{ fontSize:18, marginBottom:4 }}>{s.icon}</div>
@@ -701,7 +698,6 @@ const handlePhoto = (e) => {
           </div>
         )}
 
-        {/* BODY FAT */}
         {tab === "bodyfat" && (
           <div style={{ animation:"fadeUp .3s ease", display:"flex", flexDirection:"column", gap:12 }}>
             <div style={{ background:card, border:"1px solid rgba(167,139,250,.2)", borderRadius:16, padding:18, backdropFilter:"blur(10px)" }}>
@@ -749,7 +745,6 @@ const handlePhoto = (e) => {
           </div>
         )}
 
-        {/* HISTORY */}
         {tab === "history" && (
           <div style={{ animation:"fadeUp .3s ease" }}>
             <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:12 }}>
@@ -801,7 +796,6 @@ const handlePhoto = (e) => {
           </div>
         )}
 
-        {/* MILESTONES */}
         {tab === "milestones" && (
           <div style={{ animation:"fadeUp .3s ease" }}>
             <div style={{ fontFamily:"'Barlow Condensed'", fontWeight:800, fontSize:14, color:accent, letterSpacing:1, marginBottom:12 }}>
@@ -825,7 +819,6 @@ const handlePhoto = (e) => {
           </div>
         )}
 
-        {/* SETTINGS */}
         {tab === "settings" && (
           <div style={{ animation:"fadeUp .3s ease", display:"flex", flexDirection:"column", gap:12 }}>
             <div style={{ background:card, border:`1px solid ${border}`, borderRadius:16, padding:18, backdropFilter:"blur(10px)" }}>
@@ -870,7 +863,6 @@ const handlePhoto = (e) => {
 
       </div>
 
-      {/* BOTTOM NAV */}
       <div style={{ position:"fixed", bottom:0, left:0, right:0, background: isDark ? "rgba(8,8,16,.95)" : "rgba(255,255,255,.95)", borderTop:`1px solid ${border}`, backdropFilter:"blur(20px)", zIndex:20 }}>
         <div style={{ maxWidth:520, margin:"0 auto", display:"flex" }}>
           {TABS.map(t => (
