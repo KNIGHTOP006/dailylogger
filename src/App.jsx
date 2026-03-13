@@ -305,9 +305,10 @@ export default function App() {
     await setDoc(doc(db, "users", USER_ID, "meta", "theme"), { value: t });
   };
 
-  const handleSubmit = async () => {
+const handleSubmit = async () => {
+    console.log("handleSubmit fired, weight:", weight);
     if (!weight) return;
-    const hCm = profile.height
+    console.log("weight passed, calling saveLog...");    const hCm = profile.height
       ? (profile.unit === "cm" ? parseFloat(profile.height) : parseFloat(profile.height) * 2.54)
       : null;
     const bf = hCm && waist && neck ? calcNavyBF(waist, neck, hCm) : null;
