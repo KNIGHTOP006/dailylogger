@@ -266,16 +266,26 @@ export default function App() {
 const saveLog = async (entry) => {
     setSyncing(true);
     try {
-      // Strip photo for now — save everything else to Firestore
-      const firestoreEntry = { ...entry, photo: null };
+      let photoURL = entry.photo;
+      if (entry.photo && entry.photo.startsWith("data:")) {
+        const formData = new FormData();
+        formData.append("file", entry.photo);
+        formData.append("upload_preset", "cwiothoo");
+        const res = await fetch("https://api.cloudinary.com/v1_1/dnh4bjljc/image/upload", {
+          method: "POST",
+          body: formData,
+        });
+        const data = await res.json();
+        photoURL = data.secure_url;
+      }
+      const firestoreEntry = { ...entry, photo: photoURL || null };
       await setDoc(doc(db, "users", USER_ID, "logs", entry.date), firestoreEntry);
     } catch (e) {
       console.error("Save failed:", e);
       showToast("Save failed! " + e.message, "❌", "#f87171");
     }
     setSyncing(false);
-  };
-  const deleteLog = async (date) => {
+  };  const deleteLog = async (date) => {
     setSyncing(true);
     try {
       const photoRef = ref(storage, `photos/${USER_ID}/${date}.jpg`);
