@@ -108,14 +108,14 @@ const checkMilestones = (logs, prevEarned) => {
   const streak = computeStreak(logs);
   const s = [...logs].sort((a,b) => new Date(a.date)-new Date(b.date));
   const loss = s.length > 1 ? s[0].weight - s[s.length-1].weight : 0;
-  if (logs.length >= 1) e.add("first_log");
-  if (streak >= 3) e.add("streak_3");
-  if (streak >= 7) e.add("streak_7");
-  if (streak >= 30) e.add("streak_30");
+  if (logs.length >= 1)  e.add("first_log");
+  if (streak >= 3)       e.add("streak_3");
+  if (streak >= 7)       e.add("streak_7");
+  if (streak >= 30)      e.add("streak_30");
   if (logs.length >= 10) e.add("logs_10");
-  if (loss >= 1) e.add("lost_1");
-  if (loss >= 5) e.add("lost_5");
-  if (loss >= 10) e.add("lost_10");
+  if (loss >= 1)         e.add("lost_1");
+  if (loss >= 5)         e.add("lost_5");
+  if (loss >= 10)        e.add("lost_10");
   const bfLogs = logs.filter(l => l.bodyFat);
   if (bfLogs.some(l => l.bodyFat < 14)) e.add("bf_athlete");
   if (bfLogs.some(l => l.bodyFat < 18)) e.add("bf_fitness");
@@ -217,7 +217,6 @@ export default function App() {
   const [weight,       setWeight]       = useState("");
   const [waist,        setWaist]        = useState("");
   const [neck,         setNeck]         = useState("");
-  const [calories,     setCalories]     = useState("");
   const [photoSrc,     setPhotoSrc]     = useState(null);
   const [photoCaption, setPhotoCaption] = useState("");
   const [submitted,    setSubmitted]    = useState(false);
@@ -230,35 +229,36 @@ export default function App() {
 
   useEffect(() => {
     if (!unlocked) { setLoading(false); return; }
-const unsubLogs = onSnapshot(
-  collection(db, "users", USER_ID, "logs"),
-  (snap) => {
-    const data = snap.docs.map(d => {
-      const entry = { ...d.data(), id: d.id };
-      // Reattach photo from localStorage
-      if (entry.photo === "saved") {
-        entry.photo = localStorage.getItem(`photo_${entry.date}`) || null;
-      }
-      return entry;
-    });
-    setLogs(data.sort((a,b) => new Date(b.date)-new Date(a.date)));
-    setLoading(false);
-  },
-  () => setLoading(false)
-);
+
+    const unsubLogs = onSnapshot(
+      collection(db, "users", USER_ID, "logs"),
+      (snap) => {
+        const data = snap.docs.map(d => {
+          const entry = { ...d.data(), id: d.id };
+          if (entry.photo === "saved") {
+            entry.photo = localStorage.getItem(`photo_${entry.date}`) || null;
+          }
+          return entry;
+        });
+        setLogs(data.sort((a,b) => new Date(b.date)-new Date(a.date)));
+        setLoading(false);
+      },
+      () => setLoading(false)
+    );
+
     getDoc(doc(db, "users", USER_ID, "meta", "profile")).then(d => { if (d.exists()) setProfile(d.data()); });
     getDoc(doc(db, "users", USER_ID, "meta", "earned")).then(d => { if (d.exists()) setEarned(d.data().list || []); });
     getDoc(doc(db, "users", USER_ID, "meta", "theme")).then(d => { if (d.exists()) setTheme(d.data().value || "dark"); });
+
     return () => unsubLogs();
   }, [unlocked]);
 
-useEffect(() => {
+  useEffect(() => {
     const ex = logs.find(l => l.date === today);
     if (ex) {
-      setWeight(ex.weight || "");
-      setWaist(ex.waist || "");
-      setNeck(ex.neck || "");
-      setCalories(ex.calories || "");
+      setWeight(String(ex.weight || ""));
+      setWaist(String(ex.waist || ""));
+      setNeck(String(ex.neck || ""));
       setPhotoSrc(ex.photo || null);
       setPhotoCaption(ex.photoCaption || "");
       setSubmitted(true);
@@ -266,24 +266,30 @@ useEffect(() => {
       setSubmitted(false);
     }
   }, [logs]);
-  
-const saveLog = async (entry) => {
-  setSyncing(true);
-  // Store photo separately in localStorage (too large for Firestore)
-  if (entry.photo) {
-    localStorage.setItem(`photo_${entry.date}`, entry.photo);
-  }
-  const firestoreEntry = { ...entry, photo: entry.photo ? "saved" : null };
-  await setDoc(doc(db, "users", USER_ID, "logs", entry.date), firestoreEntry);
-  setSyncing(false);
-};
 
-const deleteLog = async (date) => {
-  setSyncing(true);
-  localStorage.removeItem(`photo_${date}`);
-  await deleteDoc(doc(db, "users", USER_ID, "logs", date));
-  setSyncing(false);
-};
+  // ── SINGLE saveLog — no duplicates ───────────────────────────────
+  const saveLog = async (entry) => {
+    setSyncing(true);
+    try {
+      if (entry.photo && entry.photo !== "saved") {
+        localStorage.setItem(`photo_${entry.date}`, entry.photo);
+      }
+      const firestoreEntry = { ...entry, photo: entry.photo ? "saved" : null };
+      await setDoc(doc(db, "users", USER_ID, "logs", entry.date), firestoreEntry);
+    } catch (e) {
+      console.error("Firestore save failed:", e);
+      showToast("Save failed! Check console.", "❌", "#f87171");
+    }
+    setSyncing(false);
+  };
+
+  const deleteLog = async (date) => {
+    setSyncing(true);
+    localStorage.removeItem(`photo_${date}`);
+    await deleteDoc(doc(db, "users", USER_ID, "logs", date));
+    setSyncing(false);
+  };
+
   const saveProfile = async (p) => {
     setProfile(p);
     await setDoc(doc(db, "users", USER_ID, "meta", "profile"), p);
@@ -299,22 +305,20 @@ const deleteLog = async (date) => {
     await setDoc(doc(db, "users", USER_ID, "meta", "theme"), { value: t });
   };
 
-  const handlePhoto = (e) => {
-    const file = e.target.files[0]; if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => setPhotoSrc(ev.target.result);
-    reader.readAsDataURL(file);
-  };
-
-const handleSubmit = async () => {
+  const handleSubmit = async () => {
     if (!weight) return;
-    const hCm = profile.height ? (profile.unit === "cm" ? parseFloat(profile.height) : parseFloat(profile.height)*2.54) : null;
-    const bf   = hCm && waist && neck ? calcNavyBF(waist, neck, hCm) : null;
+    const hCm = profile.height
+      ? (profile.unit === "cm" ? parseFloat(profile.height) : parseFloat(profile.height) * 2.54)
+      : null;
+    const bf = hCm && waist && neck ? calcNavyBF(waist, neck, hCm) : null;
     const entry = {
-      date: today, weight: parseFloat(weight),
-      waist: waist || null, neck: neck || null, bodyFat: bf,
-      calories: calories || null,
-      photo: photoSrc || null, photoCaption: photoCaption || null,
+      date: today,
+      weight: parseFloat(weight),
+      waist: waist || null,
+      neck: neck || null,
+      bodyFat: bf,
+      photo: photoSrc || null,
+      photoCaption: photoCaption || null,
     };
     await saveLog(entry);
     const newLogs = [...logs.filter(l => l.date !== today), entry].sort((a,b) => new Date(b.date)-new Date(a.date));
@@ -327,17 +331,19 @@ const handleSubmit = async () => {
     setSubmitted(true);
     showToast("Check-in saved! 💪", "✅", "#34d399");
   };
-  const handleSaveNutrition = async () => {
-    const existing = logs.find(l => l.date === today);
-    if (!existing) { showToast("Save your check-in first!", "⚠️", "#f87171"); return; }
-    const updated = { ...existing, calories: calories || null };
-    await saveLog(updated);
-    showToast("Nutrition saved! 🔥", "🔥", "#fbbf24");
+
+  const handlePhoto = (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => setPhotoSrc(ev.target.result);
+    reader.readAsDataURL(file);
   };
 
   const exportCSV = () => {
-    const rows = [["Date","Weight(kg)","Waist(cm)","Neck(cm)","BodyFat%","Calories"],
-      ...sorted.map(l => [l.date, l.weight, l.waist||"", l.neck||"", l.bodyFat||"", l.calories||""])];
+    const rows = [
+      ["Date","Weight(kg)","Waist(cm)","Neck(cm)","BodyFat%","Calories"],
+      ...sorted.map(l => [l.date, l.weight, l.waist||"", l.neck||"", l.bodyFat||"", l.calories||""])
+    ];
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([rows.map(r=>r.join(",")).join("\n")], {type:"text/csv"}));
     a.download = "daily-log.csv"; a.click();
@@ -357,7 +363,7 @@ const handleSubmit = async () => {
   const bmiCat        = bmi ? getBMICat(bmi) : null;
   const bfChartData   = chronological.filter(l => l.bodyFat).map(l => ({ date: l.date.slice(5), bf: l.bodyFat }));
   const prediction    = buildPrediction(logs, profile, predWeeks);
-  const todayComplete = weight && photoSrc;
+  const todayComplete = !!(weight && submitted);
 
   const isDark = theme === "dark";
   const text   = isDark ? "#f0f0ff" : "#12122a";
@@ -413,7 +419,6 @@ const handleSubmit = async () => {
         .tab-btn:active{transform:scale(.95)}
       `}</style>
 
-      {/* CONFIRMATION TOAST */}
       {toast && (
         <div style={{ position:"fixed", bottom:100, left:"50%", transform:"translateX(-50%)", zIndex:999, animation:"slideUp .35s cubic-bezier(.34,1.56,.64,1)", background: isDark ? "rgba(20,20,32,.97)" : "rgba(255,255,255,.97)", border:`1px solid ${toast.color}55`, borderRadius:14, padding:"13px 22px", display:"flex", alignItems:"center", gap:10, boxShadow:"0 8px 32px rgba(0,0,0,.35)", minWidth:220 }}>
           <div style={{ fontSize:22 }}>{toast.icon}</div>
@@ -421,7 +426,6 @@ const handleSubmit = async () => {
         </div>
       )}
 
-      {/* BADGE TOAST */}
       {newBadge && (
         <div style={{ position:"fixed", top:16, left:"50%", transform:"translateX(-50%)", zIndex:998, animation:"slideDown .45s cubic-bezier(.34,1.56,.64,1)", background:"linear-gradient(135deg,#c2410c,#f97316)", borderRadius:20, padding:"16px 30px", textAlign:"center", boxShadow:"0 16px 50px rgba(249,115,22,.55)", minWidth:250 }}>
           <div style={{ fontSize:38 }}>{newBadge.icon}</div>
@@ -454,16 +458,15 @@ const handleSubmit = async () => {
         </div>
       </div>
 
-      <div style={{ maxWidth:520, margin:"0 auto", padding:"12px 13px 90px" }}>
+      <div style={{ maxWidth:520, margin:"0 auto", padding:"12px 13px 100px" }}>
 
-        {/* STATS ROW */}
         {latest && (
           <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:8, marginBottom:13 }}>
             {[
-              { label:"Weight",   val:`${latest.weight}`,                                                                    sub:"kg",    icon:"⚖️", col:accent },
-              { label:"Body Fat", val:latestBF ? `${latestBF}%` : "—",                                                      sub:latestBFCat?.label||"measure", icon:"📏", col:"#a78bfa" },
-              { label:"Change",   val:totalChange ? (parseFloat(totalChange)>0?`+${totalChange}`:totalChange) : "—",         sub:"kg",    icon:parseFloat(totalChange)<0?"📉":"📈", col:parseFloat(totalChange)<0?"#34d399":"#fbbf24" },
-              { label:"Streak",   val:streak,                                                                                 sub:"days",  icon:"🔥", col:"#fbbf24" },
+              { label:"Weight",   val:`${latest.weight}`, sub:"kg",   icon:"⚖️", col:accent },
+              { label:"Body Fat", val:latestBF ? `${latestBF}%` : "—", sub:latestBFCat?.label||"measure", icon:"📏", col:"#a78bfa" },
+              { label:"Change",   val:totalChange ? (parseFloat(totalChange)>0?`+${totalChange}`:totalChange) : "—", sub:"kg", icon:parseFloat(totalChange)<0?"📉":"📈", col:parseFloat(totalChange)<0?"#34d399":"#fbbf24" },
+              { label:"Streak",   val:streak, sub:"days", icon:"🔥", col:"#fbbf24" },
             ].map((s,i) => (
               <div key={i} style={{ background:card, border:`1px solid ${s.col}28`, borderRadius:12, padding:"10px 5px", textAlign:"center", backdropFilter:"blur(10px)" }}>
                 <div style={{ fontSize:15 }}>{s.icon}</div>
@@ -474,7 +477,7 @@ const handleSubmit = async () => {
           </div>
         )}
 
-        {/* TABS */}
+        {/* TAB ICONS */}
         <div style={{ display:"flex", gap:3, background: isDark ? "rgba(255,255,255,.04)" : "rgba(0,0,0,.04)", borderRadius:14, padding:4, marginBottom:15 }}>
           {TABS.map(t => (
             <button key={t.id} className="tab-btn" onClick={() => setTab(t.id)} style={{ flex:1, padding:"9px 2px", border:"none", borderRadius:10, background: tab===t.id ? "linear-gradient(135deg,#c2410c,#f97316)" : "transparent", color: tab===t.id ? "#fff" : muted, fontSize:18, cursor:"pointer", transition:"all .2s" }} title={t.label}>{t.icon}</button>
@@ -484,7 +487,7 @@ const handleSubmit = async () => {
         {/* CHECK-IN */}
         {tab === "checkin" && (
           <div style={{ animation:"fadeUp .3s ease" }}>
-            {submitted && todayComplete && (
+            {todayComplete && (
               <div style={{ marginBottom:13, padding:"13px 16px", background:"linear-gradient(135deg,rgba(52,211,153,.12),rgba(16,185,129,.08))", border:"1px solid rgba(52,211,153,.28)", borderRadius:14, display:"flex", alignItems:"center", gap:12 }}>
                 <div style={{ fontSize:26 }}>✅</div>
                 <div>
@@ -493,11 +496,13 @@ const handleSubmit = async () => {
                 </div>
               </div>
             )}
+
             <div style={{ background:card, border:`1px solid ${border}`, borderRadius:16, padding:17, marginBottom:11, backdropFilter:"blur(10px)" }}>
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:11 }}>
                 <div style={{ fontFamily:"'Barlow Condensed'", fontWeight:800, fontSize:13, color:accent, letterSpacing:1 }}>📸 TODAY'S PHOTO</div>
-                {!photoSrc ? <div style={{ fontSize:10, color:"#f87171", fontWeight:700, background:"rgba(248,113,113,.1)", padding:"3px 8px", borderRadius:99 }}>REQUIRED</div>
-                           : <div style={{ fontSize:10, color:"#34d399", fontWeight:700, background:"rgba(52,211,153,.1)", padding:"3px 8px", borderRadius:99 }}>✓ DONE</div>}
+                {!photoSrc
+                  ? <div style={{ fontSize:10, color:muted, fontWeight:700, background: isDark?"rgba(255,255,255,.06)":"rgba(0,0,0,.05)", padding:"3px 8px", borderRadius:99 }}>OPTIONAL</div>
+                  : <div style={{ fontSize:10, color:"#34d399", fontWeight:700, background:"rgba(52,211,153,.1)", padding:"3px 8px", borderRadius:99 }}>✓ DONE</div>}
               </div>
               {photoSrc ? (
                 <div>
@@ -516,6 +521,7 @@ const handleSubmit = async () => {
               )}
               <input ref={fileRef} type="file" accept="image/*" onChange={handlePhoto} style={{ display:"none" }}/>
             </div>
+
             <div style={{ background:card, border:`1px solid ${border}`, borderRadius:16, padding:17, marginBottom:11, backdropFilter:"blur(10px)" }}>
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:11 }}>
                 <div style={{ fontFamily:"'Barlow Condensed'", fontWeight:800, fontSize:13, color:accent, letterSpacing:1 }}>⚖️ WEIGHT</div>
@@ -526,6 +532,7 @@ const handleSubmit = async () => {
                 style={{ ...inp, fontFamily:"'Barlow Condensed'", fontWeight:800, fontSize:30, letterSpacing:1, borderColor:weight?accent:border, textAlign:"center" }}/>
               <div style={{ fontSize:10, color:muted, textAlign:"center", marginTop:6 }}>in kilograms (kg)</div>
             </div>
+
             <div style={{ background:card, border:"1px solid rgba(167,139,250,.25)", borderRadius:16, padding:17, marginBottom:11, backdropFilter:"blur(10px)" }}>
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:5 }}>
                 <div style={{ fontFamily:"'Barlow Condensed'", fontWeight:800, fontSize:13, color:"#a78bfa", letterSpacing:1 }}>📏 BODY FAT CALCULATOR</div>
@@ -564,44 +571,46 @@ const handleSubmit = async () => {
                 </div>
               )}
             </div>
+
             <button onClick={handleSubmit} disabled={!weight} style={{ width:"100%", padding:"15px", border:"none", borderRadius:14, background: weight ? "linear-gradient(135deg,#c2410c,#f97316)" : isDark ? "rgba(255,255,255,.07)" : "rgba(0,0,0,.07)", color: weight ? "#fff" : muted, fontFamily:"'Barlow Condensed'", fontWeight:800, fontSize:22, letterSpacing:3, cursor: weight ? "pointer" : "not-allowed", transition:"all .2s", boxShadow: weight ? "0 6px 24px rgba(249,115,22,.35)" : "none" }}>
               {submitted ? "✓ UPDATE CHECK-IN" : "SAVE CHECK-IN"}
             </button>
-            {!todayComplete && (
-              <div style={{ marginTop:8, textAlign:"center", fontSize:11, color:muted }}>
-                Still needed: {[!photoSrc && "📷 Photo", !weight && "⚖️ Weight"].filter(Boolean).join(" • ")}
-              </div>
+            {!weight && (
+              <div style={{ marginTop:8, textAlign:"center", fontSize:11, color:muted }}>⚖️ Enter your weight to save</div>
             )}
           </div>
         )}
 
-{tab === "nutrition" && (
-  <div style={{ animation:"fadeUp .3s ease" }}>
-    <NutritionLogger
-      isDark={isDark}
-      accentColor="#f97316"
-      onSave={async (data) => {
-        const existing = logs.find(l => l.date === today);
-        const updated = {
-          date: today,
-          weight: existing?.weight ?? parseFloat(weight) ?? null,
-          waist: existing?.waist ?? waist ?? null,
-          neck: existing?.neck ?? neck ?? null,
-          bodyFat: existing?.bodyFat ?? null,
-          photo: existing?.photo ?? photoSrc ?? null,
-          photoCaption: existing?.photoCaption ?? photoCaption ?? null,
-          calories: data.calories,
-          protein: data.protein,
-          carbs: data.carbs,
-          fat: data.fat,
-          foodLog: data.foodLog,
-        };
-        await saveLog(updated);
-        showToast("Nutrition saved! 🔥", "🔥", "#fbbf24");
-      }}
-    />
-  </div>
-)}        {/* PREDICT */}
+        {/* NUTRITION */}
+        {tab === "nutrition" && (
+          <div style={{ animation:"fadeUp .3s ease" }}>
+            <NutritionLogger
+              isDark={isDark}
+              accentColor="#f97316"
+              onSave={async (data) => {
+                const existing = logs.find(l => l.date === today);
+                const updated = {
+                  date: today,
+                  weight: existing?.weight ?? (weight ? parseFloat(weight) : null),
+                  waist: existing?.waist ?? waist ?? null,
+                  neck: existing?.neck ?? neck ?? null,
+                  bodyFat: existing?.bodyFat ?? null,
+                  photo: existing?.photo ?? photoSrc ?? null,
+                  photoCaption: existing?.photoCaption ?? photoCaption ?? null,
+                  calories: data.calories,
+                  protein: data.protein,
+                  carbs: data.carbs,
+                  fat: data.fat,
+                  foodLog: data.foodLog,
+                };
+                await saveLog(updated);
+                showToast("Nutrition saved! 🔥", "🔥", "#fbbf24");
+              }}
+            />
+          </div>
+        )}
+
+        {/* PREDICT */}
         {tab === "predict" && (
           <div style={{ animation:"fadeUp .3s ease", display:"flex", flexDirection:"column", gap:12 }}>
             {!prediction ? (
@@ -620,8 +629,8 @@ const handleSubmit = async () => {
                 <>
                   <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
                     {[
-                      { label:"Your TDEE",     val:`${tdee}`,                                sub:"kcal/day",     icon:"⚡", col:"#60a5fa" },
-                      { label:"Avg Intake",    val:`${avgCal}`,                             sub:"kcal/day",     icon:"🍽️", col:"#fbbf24" },
+                      { label:"Your TDEE",     val:`${tdee}`,                                sub:"kcal/day",              icon:"⚡", col:"#60a5fa" },
+                      { label:"Avg Intake",    val:`${avgCal}`,                             sub:"kcal/day",              icon:"🍽️", col:"#fbbf24" },
                       { label:"Daily Deficit", val:`${Math.abs(Math.round(dailyDeficit))}`, sub:isDeficit?"deficit":"surplus", icon:isDeficit?"📉":"📈", col:isDeficit?"#34d399":"#f87171" },
                       { label:"Weekly Loss",   val:weeklyFatLossKg>0?`${weeklyFatLossKg.toFixed(2)}`:"0", sub:"kg/week", icon:"🔥", col:isDeficit?"#34d399":"#f87171" },
                     ].map((s,i) => (
@@ -740,7 +749,7 @@ const handleSubmit = async () => {
             {sorted.length === 0 ? (
               <div style={{ textAlign:"center", padding:"50px 20px", color:muted }}>
                 <div style={{ fontSize:40, marginBottom:10 }}>🗓</div>
-                <div>No entries yet!</div>
+                <div>No entries yet — save your first check-in!</div>
               </div>
             ) : (
               <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
@@ -760,6 +769,7 @@ const handleSubmit = async () => {
                               </div>
                               <div style={{ fontSize:10, color:muted, marginTop:2 }}>{new Date(entry.date+"T12:00:00").toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})}</div>
                               {entry.calories && <div style={{ fontSize:11, color:"#fbbf24", marginTop:3 }}>🔥 {entry.calories} kcal</div>}
+                              {entry.protein && <div style={{ fontSize:10, color:muted, marginTop:1 }}>P:{entry.protein}g • C:{entry.carbs}g • F:{entry.fat}g</div>}
                               {entry.photoCaption && <div style={{ fontSize:10, color:muted, fontStyle:"italic", marginTop:2 }}>"{entry.photoCaption}"</div>}
                             </div>
                             <div style={{ display:"flex", flexDirection:"column", alignItems:"flex-end", gap:5 }}>
@@ -848,6 +858,18 @@ const handleSubmit = async () => {
           </div>
         )}
 
+      </div>
+
+      {/* BOTTOM NAV */}
+      <div style={{ position:"fixed", bottom:0, left:0, right:0, background: isDark ? "rgba(8,8,16,.95)" : "rgba(255,255,255,.95)", borderTop:`1px solid ${border}`, backdropFilter:"blur(20px)", zIndex:20 }}>
+        <div style={{ maxWidth:520, margin:"0 auto", display:"flex" }}>
+          {TABS.map(t => (
+            <button key={t.id} onClick={() => setTab(t.id)} style={{ flex:1, padding:"10px 2px 12px", border:"none", background:"transparent", color: tab===t.id ? accent : muted, cursor:"pointer", display:"flex", flexDirection:"column", alignItems:"center", gap:2, transition:"color .2s" }}>
+              <span style={{ fontSize:20 }}>{t.icon}</span>
+              <span style={{ fontSize:9, fontWeight: tab===t.id ? 700 : 400, letterSpacing:.3 }}>{t.label}</span>
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );
