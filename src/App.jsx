@@ -356,16 +356,26 @@ const saveLog = async (entry) => {
     reader.readAsDataURL(file);
   };
 
-  const exportCSV = () => {
+const exportCSV = () => {
     const rows = [
-      ["Date","Weight(kg)","Waist(cm)","Neck(cm)","BodyFat%","Calories"],
-      ...sorted.map(l => [l.date, l.weight, l.waist||"", l.neck||"", l.bodyFat||"", l.calories||""])
+      ["Date","Weight(kg)","Waist(cm)","Neck(cm)","BodyFat%","Calories","Protein(g)","Carbs(g)","Fat(g)","Photo URL"],
+      ...sorted.map(l => [
+        l.date,
+        l.weight,
+        l.waist||"",
+        l.neck||"",
+        l.bodyFat||"",
+        l.calories||"",
+        l.protein||"",
+        l.carbs||"",
+        l.fat||"",
+        l.photo||""
+      ])
     ];
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([rows.map(r=>r.join(",")).join("\n")], {type:"text/csv"}));
     a.download = "daily-log.csv"; a.click();
   };
-
   const sorted        = [...logs].sort((a,b) => new Date(b.date)-new Date(a.date));
   const chronological = [...logs].sort((a,b) => new Date(a.date)-new Date(b.date));
   const latest        = sorted[0];
