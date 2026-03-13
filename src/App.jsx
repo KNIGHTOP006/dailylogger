@@ -310,15 +310,20 @@ const deleteLog = async (date) => {
       calories: calories || null,
       photo: photoSrc || null, photoCaption: photoCaption || null,
     };
-    await saveLog(entry);
-    const newLogs = [...logs.filter(l => l.date !== today), entry].sort((a,b) => new Date(b.date)-new Date(a.date));
-    const ne = checkMilestones(newLogs, earned);
-    if (ne.length > earned.length) {
-      const badge = MILESTONES.find(m => !earned.includes(m.id) && ne.includes(m.id));
-      if (badge) { setNewBadge(badge); setTimeout(() => setNewBadge(null), 3500); }
-      await saveEarned(ne);
+const saveLog = async (entry) => {
+  setSyncing(true);
+  try {
+    if (entry.photo && entry.photo !== "saved") {
+      localStorage.setItem(`photo_${entry.date}`, entry.photo);
     }
-    setSubmitted(true);
+    const firestoreEntry = { ...entry, photo: entry.photo ? "saved" : null };
+    await setDoc(doc(db, "users", USER_ID, "logs", entry.date), firestoreEntry);
+    console.log("✅ Saved to Firestore:", firestoreEntry);
+  } catch (e) {
+    console.error("❌ Firestore save failed:", e);
+  }
+  setSyncing(false);
+};    setSubmitted(true);
     showToast("Check-in saved! 💪", "✅", "#34d399");
   };
 
